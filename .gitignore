@@ -1,0 +1,10 @@
+# 二进制
+*.exe
+zresearch
+
+# 本地环境与产物
+.env
+outputs/
+
+# 测试缓存
+*.out
