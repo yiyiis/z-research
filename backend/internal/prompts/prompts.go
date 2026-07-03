@@ -1,13 +1,14 @@
-package main
+// Package prompts 提供研究流程中各阶段的中文 prompt 模板（纯函数，无副作用）。
+package prompts
 
 import (
 	"fmt"
 	"strings"
 )
 
-// chooseAgentSystemPrompt 让 LLM 根据查询扮演最合适的领域专家，返回角色设定。
+// ChooseAgentSystemPrompt 让 LLM 根据查询扮演最合适的领域专家，返回角色设定。
 // 对齐 gpt-researcher 的 auto_agent_instructions 思路（中文版）。
-func chooseAgentSystemPrompt() string {
+func ChooseAgentSystemPrompt() string {
 	return `你是一个擅长分析研究任务并分配专家角色的助手。
 根据用户的研究查询，判断最适合回答该问题的专家角色，并直接输出一段简洁的"角色设定"。
 
@@ -18,12 +19,13 @@ func chooseAgentSystemPrompt() string {
 只输出上述两行，不要输出 JSON、不要输出 markdown 代码块。`
 }
 
-func chooseAgentUserPrompt(query string) string {
+// ChooseAgentUserPrompt 构造选角色的 user 消息。
+func ChooseAgentUserPrompt(query string) string {
 	return fmt.Sprintf("研究查询：%s", query)
 }
 
-// subQuerySystemPrompt 指导 LLM 把一个大查询拆成若干个精准的搜索词。
-func subQuerySystemPrompt() string {
+// SubQuerySystemPrompt 指导 LLM 把一个大查询拆成若干个精准的搜索词。
+func SubQuerySystemPrompt() string {
 	return `你是一个搜索查询规划专家。
 给定一个研究主题，请生成若干个 Google 风格的搜索词，用于在网上检索相关信息。
 要求：
@@ -34,12 +36,13 @@ func subQuerySystemPrompt() string {
 - 不要输出任何解释性文字或 markdown 代码块。`
 }
 
-func subQueryUserPrompt(query string, n int) string {
+// SubQueryUserPrompt 构造生成子查询的 user 消息。
+func SubQueryUserPrompt(query string, n int) string {
 	return fmt.Sprintf("研究主题：%s\n\n请生成 %d 个搜索词，仅输出 JSON 字符串数组。", query, n)
 }
 
-// reportSystemPrompt 生成撰写最终报告的 system 提示，带入角色。
-func reportSystemPrompt(role string, language string) string {
+// ReportSystemPrompt 生成撰写最终报告的 system 提示，带入角色。
+func ReportSystemPrompt(role string, language string) string {
 	langName := languageName(language)
 	return fmt.Sprintf(`%s
 
@@ -52,7 +55,8 @@ func reportSystemPrompt(role string, language string) string {
 6. 客观、严谨，不加入个人观点。`, role, langName)
 }
 
-func reportUserPrompt(query, context string, totalWords int) string {
+// ReportUserPrompt 构造撰写报告的 user 消息。
+func ReportUserPrompt(query, context string, totalWords int) string {
 	return fmt.Sprintf(`# 研究查询
 %s
 

@@ -1,10 +1,15 @@
-package main
+// Package compress 实现基于 embedding 相似度的"即用即抛"内存文本压缩。
+//
+// 它不依赖任何外部向量数据库：把网页正文切片、批量计算 embedding、
+// 与查询做余弦相似度排序、保留最相关的若干块。请求结束即释放。
+package compress
 
 import (
 	"context"
 	"fmt"
 	"math"
 	"sort"
+	"sync"
 
 	"github.com/cloudwego/eino/components/embedding"
 )
@@ -86,21 +91,46 @@ func Compress(
 		return "", nil
 	}
 
-	// 一次性 embed：[query, chunk0, chunk1, ...]
-	all := make([]string, 0, len(chunks)+1)
-	all = append(all, query)
-	all = append(all, chunks...)
-	vecs, err := emb.EmbedStrings(ctx, all)
+	// 先单独 embed 查询。
+	queryVecs, err := emb.EmbedStrings(ctx, []string{query})
 	if err != nil {
-		return "", fmt.Errorf("计算 embedding 失败: %w", err)
+		return "", fmt.Errorf("计算查询 embedding 失败: %w", err)
 	}
-	if len(vecs) != len(all) {
-		return "", fmt.Errorf("embedding 返回数量不匹配: got=%d want=%d", len(vecs), len(all))
+	queryVec := queryVecs[0]
+
+	// 并发 embed 各 chunk（每个 chunk 独立请求，Ollama 可并行处理）。
+	// 实测：批量一次性 embed 长文本会很慢（Ollama 串行处理），
+	// 拆成并发单条请求可显著缩短总耗时。
+	const embedConcurrency = 4
+	chunkVecs := make([][]float64, len(chunks))
+	errs := make([]error, len(chunks))
+	sem := make(chan struct{}, embedConcurrency)
+	var wg sync.WaitGroup
+	for i, chunk := range chunks {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, text string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			v, e := emb.EmbedStrings(ctx, []string{text})
+			if e != nil || len(v) != 1 {
+				errs[i] = e
+				return
+			}
+			chunkVecs[i] = v[0]
+		}(i, chunk)
 	}
-	queryVec := vecs[0]
+	wg.Wait()
+
+	// 检查错误（任一 chunk 失败则整体失败，避免静默丢数据）。
+	for i, e := range errs {
+		if e != nil {
+			return "", fmt.Errorf("计算第 %d 个 chunk embedding 失败: %w", i, e)
+		}
+	}
 
 	scored := make([]scoredChunk, 0, len(chunks))
-	for i, chunkVec := range vecs[1:] {
+	for i, chunkVec := range chunkVecs {
 		s := cosine(queryVec, chunkVec)
 		if s >= threshold {
 			scored = append(scored, scoredChunk{text: chunks[i], score: s})
@@ -117,7 +147,6 @@ func Compress(
 	}
 
 	// 为了保留行文连贯性，按"在原文中的出现顺序"重新拼接。
-	// 通过遍历原始 chunks 顺序重建。
 	keep := make(map[string]bool, len(scored))
 	for _, sc := range scored {
 		keep[sc.text] = true
@@ -132,8 +161,8 @@ func Compress(
 	return string(b), nil
 }
 
-// cosine 计算两个向量的余弦相似度。
-func cosine(a, b []float64) float64 {
+// Cosine 计算两个向量的余弦相似度。
+func Cosine(a, b []float64) float64 {
 	if len(a) != len(b) || len(a) == 0 {
 		return 0
 	}
@@ -148,3 +177,6 @@ func cosine(a, b []float64) float64 {
 	}
 	return dot / (math.Sqrt(na) * math.Sqrt(nb))
 }
+
+// cosine 是 Cosine 的内部别名（保持向后兼容）。
+func cosine(a, b []float64) float64 { return Cosine(a, b) }

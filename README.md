@@ -1,144 +1,221 @@
 # z-research
 
-一个基于 [Eino](https://github.com/cloudwego/eino) 的**简易研究 Agent**（Go 版 gpt-researcher）。
-给定一个研究问题，它会自动联网检索、抓取网页、压缩提炼资料，并生成一份**带来源引用的中文 Markdown 报告**。
+一个基于 [Eino](https://github.com/cloudwego/eino) 的 **AI 研究 Agent 全栈应用**（Go 后端 + React 前端）。
+输入一个研究问题，它会自动联网检索、抓取网页、压缩提炼资料，并生成一份**带来源引用的中文 Markdown 报告**，
+全程通过 **WebSocket** 实时推送研究进度，历史报告持久化到 SQLite。
 
-> 本项目是参考 `Golang-爬虫脚本-Eino-集成.md` 的设计理念与 [`gpt-researcher`](https://github.com/assafelovic/gpt-researcher) 的默认执行流，用 Go + Eino 实现的**最简易版本（固定工作流 Fixed Workflow）**。
+> 实时推送用 WebSocket（非 SSE）：研究过程的 LLM 推理有较长静默期，SSE 会因 HTTP idle 超时断连，WebSocket 是全双工长连接，天然保持。与 [gpt-researcher](https://github.com/assafelovic/gpt-researcher) 的 `/ws` 设计一致。
 
-## 架构
+> 参考设计见 [`docs/Golang-爬虫脚本-Eino-集成.md`](docs/Golang-爬虫脚本-Eino-集成.md) 与 [gpt-researcher](https://github.com/assafelovic/gpt-researcher) 的默认工作流。
 
-忠实移植 gpt-researcher 的**默认模式**（固定工作流，非 ReAct）：
+---
 
-```
-用户 query
-  → [1] choose_agent (LLM)        选择领域专家角色
-  → [2] plan_sub_queries (LLM)    拆成 N 个子查询 (默认 N=3)
-  → [3] 对每个子查询并发 (errgroup):
-           DuckDuckGo 搜索 → 取 Top-K URL → 并发抓取 (goquery)
-           → 内存 embedding 相似度压缩 (不存向量库)
-  → [4] 合并所有压缩后的上下文 (带来源编号)
-  → [5] write_report (LLM)        生成中文 Markdown 报告，正文 [n] 引用 + 参考资料
-```
+## 一、环境要求
 
-关键设计（来自 .md 文档）：
-- **动态网页用 embedding 提纯，不存向量库** —— 资料"即用即抛"，请求结束即释放。
-- **工具层硬截断** —— 搜索/抓取条数由配置严格限定，成本可控、不会失控。
-- **规划与执行分离** —— 确定性工作流保证稳定，不做自主 ReAct 循环。
+| 依赖 | 版本 | 用途 | 是否必需 |
+|---|---|---|---|
+| **Go** | ≥ 1.25 | 后端 | ✅ 必需 |
+| **Node.js** | ≥ 18 | 前端开发与构建 | ⚠️ 仅前端需要 |
+| **Make** | 任意 | 执行 Makefile 命令 | ✅ 必需（或参考下文手动命令） |
+| **LLM API Key** | — | 对话模型 | ✅ 必需（默认智谱 GLM） |
 
-## 技术栈
+> 没装 Node？后端 API 仍可独立运行，只是没有前端界面。
+> 没装 Make？下文每条命令都附了等价的「手动命令」，可直接复制到终端执行。
 
-| 能力 | 组件 |
-|---|---|
-| 对话模型 | `eino-ext/components/model/openai`（OpenAI 兼容，默认指向智谱 GLM） |
-| Embedding | OpenAI 兼容（默认 GLM `embedding-3`）**或自建 Ollama**（`nomic-embed-text` 等） |
-| 搜索 | `eino-ext/components/tool/duckduckgo/v2`（免费，无需 API Key） |
-| 网页抓取 | `net/http` + `PuerkitoBio/goquery` |
-| 编排 | 标准库 `errgroup`（并发子查询） |
+---
 
-### Embedding 后端
-
-统一走 **OpenAI 兼容接口**（`/v1/embeddings`）：GLM / DeepSeek / OpenAI / 自建 Ollama 都接同一套代码，无需为不同服务写适配器。LLM 与 Embedding 可**解耦部署**——例如 LLM 用云端 GLM，Embedding 用自建 Ollama。
-
-
-## 快速开始
-
-### 1. 配置
+## 二、首次配置
 
 ```bash
+cd backend
 cp .env.example .env
-# 编辑 .env，填入智谱 GLM 的 API Key（必填）
+# 用编辑器打开 backend/.env，至少填入：
+#   ZHIPU_API_KEY=你的智谱GLM密钥
 ```
 
-默认指向智谱 GLM 的 OpenAI 兼容端点；也可改 `LLM_BASE_URL` / `EMBED_BASE_URL` 接入 DeepSeek / OpenAI / 任意代理。
+其余配置（模型、端口、研究参数）都有内置默认值，可不动。完整说明见 [`backend/.env.example`](backend/.env.example)。
 
-### 用自建 Ollama 做 Embedding（LLM 仍用 GLM）
-
-如果你的 Ollama 部署在公网服务器（已验证可用，如 `http://43.138.247.132:11434`，模型 `nomic-embed-text`，768 维），只需把 `EMBED_BASE_URL` 指向它的 OpenAI 兼容层，**不改任何代码**：
-
+可选：用自建 Ollama 做 embedding（无需改代码，只改 `.env`）：
 ```bash
-# LLM 继续用云端 GLM
-ZHIPU_API_KEY=你的GLM密钥
-LLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
-LLM_MODEL=glm-4-plus
-
-# Embedding 改用自建 Ollama（OpenAI 兼容层 /v1/embeddings）
-EMBED_BASE_URL=http://43.138.247.132:11434/v1
+EMBED_BASE_URL=http://your-ollama-host:11434/v1
 EMBED_MODEL=nomic-embed-text
-EMBED_API_KEY=ollama   # Ollama 不校验 key，填任意非空值即可（OpenAI 客户端要求非空）
+EMBED_API_KEY=ollama
 ```
 
-Ollama 自带 OpenAI 兼容层，与 GLM/DeepSeek 走同一套代码路径，所以无需为它写专用适配器。
+---
 
-### 2. 运行
+## 三、运行（开发模式）
+
+**开发模式下前后端分离运行**：后端跑在 `:8080`，前端 Vite dev server 跑在 `:5173` 并自动把 `/api` 请求代理到后端。
+
+**用 Make：**
+```bash
+make install    # 首次：安装依赖（go mod tidy + npm install）
+make dev        # 启动后端 + 前端（并行）
+```
+
+**手动命令（等价）：**
+```bash
+# 终端 1 —— 后端
+cd backend
+go mod tidy
+go run ./cmd/server --dev
+
+# 终端 2 —— 前端
+cd frontend
+npm install
+npm run dev
+```
+
+打开浏览器访问 **http://localhost:5173** 即可。
+
+> 后端 API 也可单独访问：http://localhost:8080/api/reports
+
+---
+
+## 四、编译（生产模式，单二进制）
+
+生产模式把前端构建产物内嵌进 Go 二进制，部署只需一个可执行文件。
+
+**用 Make：**
+```bash
+make build      # 构建：前端 → 内嵌 → 编译 backend/z-research-server.exe
+make run        # 运行（前端已内嵌）
+```
+
+`make build` 实际执行三步：
+1. `npm run build` → 产出 `frontend/dist/`
+2. 拷贝到 `backend/internal/api/web/`（供 `go:embed` 内嵌）
+3. `go build -o z-research-server.exe ./cmd/server`
+
+**手动命令（等价）：**
+```bash
+# 1. 构建前端
+cd frontend
+npm install
+npm run build
+
+# 2. 拷贝到 embed 目录
+rm -rf ../backend/internal/api/web
+mkdir -p ../backend/internal/api/web
+cp -r dist/. ../backend/internal/api/web/
+
+# 3. 编译二进制
+cd ../backend
+go build -o z-research-server.exe ./cmd/server
+
+# 4. 运行
+./z-research-server.exe --dev=false
+```
+
+运行后访问 **http://localhost:8080**（前后端同源，前端由后端托管）。
+
+> 二进制可拷贝到任意机器运行，无需 Go/Node 环境（仅需 `.env` 配好 LLM 与端口）。
+
+---
+
+## 五、测试
+
+测试都在 `backend/`，覆盖每个功能点（config / llm / search / compress / researcher / store / api）。
+其中部分是**联网测试**（真实调用 DuckDuckGo、Ollama），无网络时会自动跳过而非失败。
+
+**用 Make：**
+```bash
+make test       # 后端全部测试
+```
+
+**手动命令（等价）：**
+```bash
+cd backend
+go test ./...                              # 全部测试（联网的会跳过）
+go test -run 'TestStore|TestReport' ./...  # 只跑纯单元测试（无需网络）
+go test -v ./internal/store/               # 单个包，详细输出
+```
+
+---
+
+## 六、兼容旧 CLI 用法
+
+仍可用命令行直接研究并打印报告到 stdout（不启动 HTTP 服务）：
 
 ```bash
-go mod tidy
-go run . "2026 年固态电池降本的最新进展"
+cd backend
+go run ./cmd/server --cli "2026 年固态电池降本的最新进展"
 ```
 
-报告会打印到终端，并落盘到 `outputs/report-<时间戳>.md`。
+---
 
-### 示例输出结构
+## 七、其他常用命令
 
-```markdown
-# 固态电池降本进展
-
-...正文，引用处标注 [1] [2]...
-
-## 参考资料
-1. 标题 — https://...
-2. 标题 — https://...
+```bash
+make tidy     # go mod tidy
+make clean    # 清理前端 dist / 二进制 / embed 产物
+make help     # 列出所有命令
 ```
 
-## 可调参数（环境变量）
+---
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `ZHIPU_API_KEY` | （必填） | LLM 凭证（GLM/OpenAI/DeepSeek 等） |
-| `LLM_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | LLM 的 OpenAI 兼容端点 |
-| `LLM_MODEL` | `glm-4-plus` | 对话模型 |
-| `EMBED_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | embedding 的 OpenAI 兼容端点（可指向自建 Ollama `/v1`） |
-| `EMBED_MODEL` | `embedding-3` | embedding 模型（Ollama 用 `nomic-embed-text` 等） |
-| `EMBED_API_KEY` | （空） | embedding 的 key；留空则回退到 `ZHIPU_API_KEY`（Ollama 填任意非空值） |
-| `MAX_ITERATIONS` | `3` | 子查询数量（研究广度） |
-| `MAX_RESULTS` | `5` | 每子查询搜索条数 |
-| `MAX_SCRAPE` | `3` | 每子查询实际抓取网页数 |
-| `SIMILARITY_THRESHOLD` | `0.42` | embedding 过滤阈值（越高越严格） |
-| `COMPRESSION_THRESHOLD` | `8000` | 总字符低于此值则跳过压缩（快路径） |
-| `TOTAL_WORDS` | `1200` | 报告目标字数 |
-| `LANGUAGE` | `zh` | 报告语言 |
-| `CONCURRENCY` | `3` | 子查询并发数 |
-
-## 目录结构
+## 项目结构
 
 ```
 z-research/
-├── main.go          # CLI 入口：query → 角色 → Conduct → 撰写报告 → 落盘
-├── config.go        # 配置加载（.env / 环境变量）
-├── llm.go           # 对话模型 + embedding 封装；Chat / ChatJSON
-├── search.go        # DuckDuckGo 搜索 → []SearchResult
-├── scraper.go       # 抓取网页，goquery 清洗正文
-├── compress.go      # 切片 + 内存 embedding 相似度压缩 + 余弦相似度
-├── researcher.go    # 研究编排器：plan → 并发{search,fetch,compress} → 合并
-├── prompts.go       # 全部中文 Prompt 模板
-├── log.go           # 进度日志
-└── *_test.go        # 单元测试 + DuckDuckGo 联网测试
+├── backend/                 # Go 后端 (Gin + Eino + SQLite)
+│   ├── cmd/server/          # 入口（HTTP 服务 / 兼容 --cli）
+│   └── internal/            # 按领域分层
+│       ├── config/          # 配置（.env / 环境变量）
+│       ├── llm/             # 对话模型 + embedding 封装
+│       ├── search/          # DuckDuckGo 搜索
+│       ├── scraper/         # 网页抓取（goquery）
+│       ├── compress/        # 内存 embedding 相似度压缩
+│       ├── prompts/         # 中文 prompt 模板
+│       ├── researcher/      # ★研究编排引擎 + 顶层 Run() + progress 回调
+│       ├── store/           # ★SQLite 持久化
+│       └── api/             # ★HTTP 层（Gin + SSE + 报告 CRUD + 前端 embed）
+├── frontend/                # React 前端 (Vite + TypeScript + Tailwind)
+│   └── src/{api,hooks,components}
+├── docs/                    # 设计文档 + architecture.md
+└── Makefile                 # dev / build / run / test 等命令
 ```
 
-## 测试
+**核心工作流**（gpt-researcher 默认固定工作流的 Go 移植）：
 
-```bash
-go test ./...                 # 含联网搜索测试（需网络，无网络会自动跳过）
-go test -run 'TestSplit|TestCosine|TestExtractJSON' -v   # 纯单元测试，无需网络
 ```
+query → 选角色(LLM) → 规划子查询(LLM)
+      → 并发{搜索 → 抓取 → 内存 embedding 压缩}
+      → 撰写中文 Markdown 报告（带 [n] 引用）
+全程 SSE 实时推送进度；报告存入 SQLite。
+```
+
+详细架构见 [`docs/architecture.md`](docs/architecture.md)。
+
+## API 速览
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `WS` | `/ws` | WebSocket 研究端点：发 `{"query":"..."}`，收 `progress`/`sources`/`done`/`error` 帧 |
+| `GET` | `/api/reports` | 历史列表（不含正文） |
+| `GET` | `/api/reports/:id` | 单篇报告全文 |
+| `DELETE` | `/api/reports/:id` | 删除报告 |
+
+## 主要配置项（`backend/.env`）
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `ZHIPU_API_KEY` | （必填） | LLM 凭证 |
+| `LLM_BASE_URL` | GLM 端点 | LLM 的 OpenAI 兼容端点 |
+| `LLM_MODEL` | `glm-4-plus` | 对话模型 |
+| `EMBED_BASE_URL` | GLM 端点 | embedding 端点（可指向自建 Ollama `/v1`） |
+| `EMBED_MODEL` | `embedding-3` | embedding 模型 |
+| `MAX_ITERATIONS` | `3` | 子查询数量（研究广度） |
+| `MAX_RESULTS` | `5` | 每子查询搜索条数 |
+| `MAX_SCRAPE` | `3` | 每子查询实际抓取网页数 |
+| `TOTAL_WORDS` | `1200` | 报告目标字数 |
+| `HTTP_ADDR` | `:8080` | HTTP 监听地址 |
+| `DB_PATH` | `data/z-research.db` | SQLite 路径 |
 
 ## 后续扩展方向
 
-当前是**第一档：固定工作流**。参考 .md 文档的"三挡"设计，后续可在此基础上扩展：
-
-- **第二档 · 深度研究 (Deep Research)**：递归树（breadth/depth），每层基于上轮 learnings 生成更刁钻的追问。
-- **第三档 · 多智能体 (Multi-Agent)**：增加 Reviewer 审核回路，对报告草稿挑刺打回重做。
-- **本地知识库 RAG**：接入本地 PDF/Word，用切片 + 轻量级向量库（如 sqlite-vec）做持久化检索。
-- **ReAct Agent**：把固定工作流的"搜索"节点替换为带工具的 ReAct 循环，赋予动态纠错能力。
-
-> 区别说明：**动态网页**用 embedding/LLM 提纯（即用即抛）；**本地知识库**才用传统 RAG（切片+向量库，一次入库长期检索）。两者在工具层对 Agent 暴露统一接口。
+- **Deep Research**：递归树（breadth/depth），每层基于上轮 learnings 追问。
+- **Multi-Agent**：增加 Reviewer 审核回路，对草稿挑刺打回重做。
+- **本地知识库 RAG**：接入本地 PDF/Word，用轻量级向量库做持久化检索。
+- **多用户/鉴权**：加 JWT。

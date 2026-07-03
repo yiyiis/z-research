@@ -1,15 +1,4 @@
-package main
-
-import (
-	"fmt"
-	"os"
-	"strconv"
-	"strings"
-
-	"github.com/joho/godotenv"
-)
-
-// Config 是 z-research 的全部可配置项。
+// Package config 定义 z-research 的配置结构与环境变量加载。
 //
 // 默认值对齐 gpt-researcher 的默认配置：
 //   - 子查询数 (MAX_ITERATIONS) = 3
@@ -19,6 +8,19 @@ import (
 //   - 报告目标字数 = 1200
 //
 // 默认指向智谱 GLM 的 OpenAI 兼容端点；可通过环境变量改为任意 OpenAI 兼容服务。
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/joho/godotenv"
+)
+
+// Config 是 z-research 的全部可配置项。
 type Config struct {
 	APIKey   string // LLM 凭证（GLM/OpenAI/DeepSeek 等 OpenAI 兼容服务）
 	LLMBase  string
@@ -39,6 +41,14 @@ type Config struct {
 	Language             string  // 报告语言
 	Temperature          float64 // LLM 温度
 	Concurrency          int     // 子查询并发数
+
+	// --- 超时（防 LLM/embedding 服务端挂起导致死等）---
+	LLMTimeout   time.Duration // LLM 单次调用超时（思考模型写长报告较慢，默认 10 分钟）
+	EmbedTimeout time.Duration // Embedding 单次调用超时（默认 60s）
+
+	// --- 服务端配置 ---
+	HTTPAddr string // HTTP 监听地址，如 ":8080"
+	DBPath   string // SQLite 文件路径
 }
 
 // 默认端点与模型（OpenAI 兼容）。
@@ -73,6 +83,14 @@ func LoadConfig() (*Config, error) {
 		Language:             getenvDefault("LANGUAGE", "zh"),
 		Temperature:          getenvFloat("TEMPERATURE", 0.35),
 		Concurrency:          getenvInt("CONCURRENCY", 3),
+
+		// 超时：LLM 默认 10 分钟（思考模型如 glm-5.1 写长报告可能要数分钟），Embedding 默认 60s。
+		// 用秒数配置（LLM_TIMEOUT_SECONDS / EMBED_TIMEOUT_SECONDS）。
+		LLMTimeout:   time.Duration(getenvInt("LLM_TIMEOUT_SECONDS", 600)) * time.Second,
+		EmbedTimeout: time.Duration(getenvInt("EMBED_TIMEOUT_SECONDS", 60)) * time.Second,
+
+		HTTPAddr: getenvDefault("HTTP_ADDR", ":8080"),
+		DBPath:   getenvDefault("DB_PATH", "data/z-research.db"),
 	}
 
 	if cfg.APIKey == "" {

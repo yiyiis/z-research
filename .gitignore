@@ -1,10 +1,24 @@
-# 二进制
+# Go
 *.exe
-zresearch
+*.exe~
+backend/z-research-server
+backend/data/*.db
+backend/data/*.db-*
+backend/outputs/
 
-# 本地环境与产物
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# 内嵌前端构建产物（构建时由 Makefile 拷贝；保留 .gitkeep）
+backend/internal/api/web/*
+!backend/internal/api/web/.gitkeep
+
+# 本地环境与缓存
 .env
-outputs/
-
-# 测试缓存
 *.out
+.DS_Store
+
+# IDE 配置与生成产物
+.zcode/
+outputs/

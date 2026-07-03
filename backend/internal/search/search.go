@@ -1,4 +1,8 @@
-package main
+// Package search 封装网络搜索引擎，当前实现为 DuckDuckGo 文本搜索。
+//
+// 使用 eino-ext duckduckgo/v2 的 NewSearch 直接调用接口（结构化返回，非 Agent 路径），
+// 返回统一的 SearchResult，屏蔽底层 DuckDuckGo 返回类型的差异。
+package search
 
 import (
 	"context"
@@ -9,7 +13,7 @@ import (
 	duckduckgo "github.com/cloudwego/eino-ext/components/tool/duckduckgo/v2"
 )
 
-// SearchResult 是统一的搜索结果结构（屏蔽底层 DuckDuckGo 返回类型的差异）。
+// SearchResult 是统一的搜索结果结构。
 type SearchResult struct {
 	Title   string
 	URL     string
@@ -17,13 +21,15 @@ type SearchResult struct {
 }
 
 // Searcher 封装 DuckDuckGo 文本搜索。
-// 使用 eino-ext duckduckgo/v2 的 NewSearch 直接调用接口（结构化返回，非 Agent 路径）。
 type Searcher struct {
 	search duckduckgo.Search
 }
 
 // NewSearcher 创建一个 DuckDuckGo 搜索器。
 // 默认全球范围 (RegionWT)，单次请求 15s 超时。
+//
+// 网络连通性（如 DDG 是否可达）由运行环境负责：可在系统层配置 HTTP 代理、
+// 使用 TUN 模式，或部署在境外服务器。应用代码不内置代理逻辑。
 func NewSearcher(ctx context.Context) (*Searcher, error) {
 	s, err := duckduckgo.NewSearch(ctx, &duckduckgo.Config{
 		MaxResults: 10, // 上限，实际返回数由调用方 max 控制
