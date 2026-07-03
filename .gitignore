@@ -22,3 +22,7 @@ backend/internal/api/web/*
 # IDE 配置与生成产物
 .zcode/
 outputs/
+# 临时/无关文件
+*.tex
+*.log
+*.tmp
