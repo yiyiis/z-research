@@ -168,6 +168,16 @@ func (s *SQLiteStore) Delete(ctx context.Context, id int64) error {
 // Close 关闭底层连接。
 func (s *SQLiteStore) Close() error { return s.db.Close() }
 
+// DB 返回底层 *sql.DB。供 multi-agent CheckPointStore
+// 使用（见 internal/multiagent/checkpoint.go）——它需要直
+// 接访问同一 DB 以建一张兄弟表。
+//
+// 这里暴露在 *SQLiteStore 上而不是 Store 接口上，因为并
+// 非所有 Store 实现都有 *sql.DB（例如内存 mock 或未来
+// 的 Postgres 适配器）。CheckPointStore 用接口断言做优雅
+// 回退。
+func (s *SQLiteStore) DB() *sql.DB { return s.db }
+
 // schemaSQL 是建表语句（与 schema.sql 一致，内联以保证 New 即可自建）。
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS reports (

@@ -10,8 +10,42 @@
 package api
 
 // ResearchRequest 是 WebSocket 客户端发来的研究请求。
+//
+// Mode: "single"（默认，单 Agent）或 "multi"（多智能体
+// 状态图）。空字符串 = 走服务端配置 ENGINE_MODE。
+//
+// HitL: 多智能体模式下启用 Human-in-the-loop 大纲审核。
+// 开启后 Browser 节点跑完会立即把 initial_research
+// 摘要推给前端；Planner 完成后会阻塞等待用户对
+// 大纲的 accept/revise 回复。关闭时（默认 false）
+// 所有阶段自动 accept。
+//
+// TaskID: 多智能体模式下的可恢复检查点 ID。前端每次
+// 研究请求生成一个 UUID，服务端用它持久化 state；
+// 中断后用同 TaskID 重启可从断点续跑（实验性，
+// 阶段 5 完成时启用）。
 type ResearchRequest struct {
-	Query string `json:"query"`
+	Query  string `json:"query"`
+	Mode   string `json:"mode,omitempty"`
+	HitL   bool   `json:"hitl,omitempty"`
+	TaskID string `json:"task_id,omitempty"`
+
+	// ReportType 仅对单 Agent 模式（mode="single" 或空）生效：
+	//   "brief"（默认，简报）或 "detailed"（详细，多轮拆分长报告）。
+	// 多智能体模式忽略此字段（它本身就是详细报告流程）。
+	ReportType string `json:"report_type,omitempty"`
+}
+
+// HumanFeedbackResponse 是 WebSocket 客户端对服务端
+// human_feedback 帧的回复。
+//
+// Accept=true 表示接受当前大纲（无 notes 字段）。Accept=false
+// 表示拒绝，Notes 给出修改意见（注入 multiagent 引擎
+// 的 HumanFeedbackFn → 驱动 revise 回路）。
+type HumanFeedbackResponse struct {
+	Type   string `json:"type"` // 必须是 "human_feedback_response"
+	Accept bool   `json:"accept"`
+	Notes  string `json:"notes,omitempty"`
 }
 
 // SourceDTO 是来源的对外结构。

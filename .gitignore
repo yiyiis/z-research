@@ -26,3 +26,7 @@ outputs/
 *.tex
 *.log
 *.tmp
+
+# 临时调试模块（独立 go.mod，非项目代码）
+hitl-e2e-test/
+mock-llm/

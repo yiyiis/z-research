@@ -11,4 +11,6 @@ export const Stage = {
   Fetching: 'fetching',
   Compressing: 'compressing',
   Writing: 'writing',
+  Outline: 'outline',
+  Section: 'section',
 } as const

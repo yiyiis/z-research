@@ -213,9 +213,69 @@ query → 选角色(LLM) → 规划子查询(LLM)
 | `HTTP_ADDR` | `:8080` | HTTP 监听地址 |
 | `DB_PATH` | `data/z-research.db` | SQLite 路径 |
 
+## 多智能体模式 (Multi-Agent)
+
+新版支持多智能体状态图编排，对标 gpt-researcher 的 STORM 论文式架构。开启方法：
+
+```bash
+# .env
+ENGINE_MODE=multi
+ENABLE_HITL=true   # 可选：开启大纲审核回路
+```
+
+或者在 WebSocket 请求中指定 `mode: "multi"`，可与单 Agent (`mode: "single"`) 动态切换。
+
+### 工作流
+
+```
+              ┌── revise ──┐
+              ▼             │
+START → Planner → HumanReview ── accept ──→ Researcher (并行 N 节) → Writer → END
+                       ▲                              │
+                       │   ┌──── revise ─────────┐    │
+                       └───┘                     ▼    ▼
+                                                Reviser ↔ Reviewer  (per section, 循环)
+```
+
+- **Planner**：LLM 出大纲（标题 + 分节列表）
+- **HumanReview**（可选）：阻塞等用户在 WebSocket 上接受/修改大纲
+- **Researcher**：对每个分节并行做 (search → fetch → compress → 写初稿)
+- **Reviewer ↔ Reviser**：对每个分节自校正（最多 `MAX_DRAFT_REVISIONS` 轮）
+- **Writer**：把分节草稿 + 全局来源汇编成最终 Markdown 报告
+
+### 配置项
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ENGINE_MODE` | `single` | `single` / `multi` |
+| `ENABLE_HITL` | `false` | 是否需要人工审核大纲 |
+| `MAX_SECTIONS` | `4` | Planner 输出的最多分节数 |
+| `MAX_PLAN_REVISIONS` | `3` | 大纲最多重规划次数 |
+| `MAX_DRAFT_REVISIONS` | `3` | 每个分节最多自校正轮数 |
+| `MAX_RUN_STEPS` | `80` | Eino graph 超步上限（兜底） |
+
+### WebSocket 协议扩展
+
+服务端在多智能体模式下会发送额外的 `human_feedback` 帧：
+
+```json
+{ "type": "human_feedback", "title": "...", "sections": ["..."], "revision": 0 }
+```
+
+客户端必须用 `human_feedback_response` 帧回复：
+
+```json
+{ "type": "human_feedback_response", "accept": true }
+// 或
+{ "type": "human_feedback_response", "accept": false, "notes": "请增加一节'未来展望'" }
+```
+
+### Checkpoint 持久化
+
+多智能体模式自动启用 SQLite checkpoint 持久化（`multiagent_checkpoints` 表），用 `WithCheckPointID(taskID)` 可在中断后从断点续跑。这是 gpt-researcher 的 `MemorySaver` 没真正实现（`orchestrator.py:115` 调用 `compile()` 时没传 checkpointer）我们补上的关键差异点。
+
 ## 后续扩展方向
 
 - **Deep Research**：递归树（breadth/depth），每层基于上轮 learnings 追问。
-- **Multi-Agent**：增加 Reviewer 审核回路，对草稿挑刺打回重做。
 - **本地知识库 RAG**：接入本地 PDF/Word，用轻量级向量库做持久化检索。
 - **多用户/鉴权**：加 JWT。

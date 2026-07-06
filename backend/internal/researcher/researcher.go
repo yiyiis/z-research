@@ -109,7 +109,8 @@ func (r *Researcher) Conduct(ctx context.Context, query string, onProgress Event
 // planSubQueries 用 LLM 把查询拆成 N 个子查询。
 func (r *Researcher) planSubQueries(ctx context.Context, query string) ([]string, error) {
 	var subQueries []string
-	if err := r.llm.ChatJSON(ctx,
+	// 用 strategic 档位（拆子查询属于规划/拆子主题，决定研究方向）。
+	if err := r.llm.StrategicChatJSON(ctx,
 		prompts.SubQuerySystemPrompt(),
 		prompts.SubQueryUserPrompt(query, r.cfg.MaxIterations),
 		&subQueries,

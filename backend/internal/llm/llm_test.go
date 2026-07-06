@@ -23,6 +23,27 @@ func TestExtractJSON(t *testing.T) {
 		{"带前后文字", "结果如下：\n[\"x\",\"y\"]\n谢谢", `["x","y"]`},
 		{"对象", `{"k":1}`, `{"k":1}`},
 		{"无JSON", "no json here", "no json here"},
+		// 未闭合 think（思考模型截断，只输出了推理没产出 JSON）：
+		// 应返回空（截断到 <think> 之前），避免把 think 里的文字误当 JSON。
+		{"未闭合think无JSON", "<think>The user wants me to revise but I ran out of tokens", ""},
+		{"未闭合think前有JSON", `{"a":1}<think>后续思考被截断`, `{"a":1}`},
+		// 思考模型（MiniMax-M3 / DeepSeek-R1）会在回答前
+		// 输出 <think>...</think> 块，里面可能含 [ 或 { 字符
+		// 干扰 JSON 提取。ExtractJSON 必须先剥离 think 块。
+		{"think块包裹数组", `<think>用户想要3个搜索词，我应该生成 ["a","b","c"] 这样的数组</think>\n["搜索词1","搜索词2","搜索词3"]`, `["搜索词1","搜索词2","搜索词3"]`},
+		{"think块包裹对象", `<think>分析完成</think>\n{"title":"test","sections":["a","b"]}`, `{"title":"test","sections":["a","b"]}`},
+		// 用户实际遇到的报错场景：think 块里有解释性文字
+		// 但没有真正的 JSON，think 块外才有合法 JSON。
+		{"think块含解释无JSON", `<think> The user wants me to generate 3 search queries. The topic is about AI. I'll create diverse queries. </think>\n["AI 发展趋势", "AI 应用场景", "AI 技术挑战"]`, `["AI 发展趋势", "AI 应用场景", "AI 技术挑战"]`},
+		// 未闭合的 <think>（模型截断）：think 块占满，
+		// JSON 在 think 内部 —— 无法可靠提取，返回空。
+		// 这是边界情况，生产中模型通常要么闭合 think 要么
+		// 在 think 外输出 JSON。
+		// 未闭合 think 且 JSON 在 think 内部：现在视为"思考被截断"，
+		// 丢弃整个 think（think 推理过程是噪音，不应作为结果）。
+		{"未闭合think且JSON在内", `<think>让我想想...\n["x","y"]`, ``},
+		// 只有闭合标签残留（think 已闭合但开始标签被截断）
+		{"仅闭合标签", `</think>\n{"k":1}`, `{"k":1}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

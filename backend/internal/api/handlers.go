@@ -18,14 +18,33 @@ import (
 )
 
 // Server 持有所有依赖，注册路由。
+//
+// 双引擎：single（单 Agent）+ multi（多智能体），按请求 opts.Mode 路由。
+// multi 可能为 nil（构造失败），前端选 multi 时报 503。
 type Server struct {
-	engine researcher.EngineIface // 研究引擎（通过接口注入，便于测试）
-	store  store.Store
+	singleEngine researcher.EngineIface
+	multiEngine  researcher.EngineIface // 可为 nil
+	store        store.Store
 }
 
 // NewServer 创建 HTTP 服务。
-func NewServer(engine researcher.EngineIface, st store.Store) *Server {
-	return &Server{engine: engine, store: st}
+func NewServer(single, multi researcher.EngineIface, st store.Store) *Server {
+	return &Server{singleEngine: single, multiEngine: multi, store: st}
+}
+
+// pickEngine 按 Mode 选引擎：multi 路由到 multiEngine，单 engine 路由到 singleEngine。
+func (s *Server) pickEngine(mode string) (researcher.EngineIface, bool) {
+	switch mode {
+	case "multi":
+		if s.multiEngine == nil {
+			return nil, false
+		}
+		return s.multiEngine, true
+	case "single", "":
+		return s.singleEngine, true
+	default:
+		return s.singleEngine, true
+	}
 }
 
 // extractTitle 从 Markdown 报告中提取标题（首个 # 行，去掉 # 前缀），失败则截断查询。
@@ -62,29 +81,46 @@ var wsUpgrader = websocket.Upgrader{
 //
 // 对齐 gpt-researcher 的设计：一条 JSON 帧，用 type 区分语义。
 // 前端按 type 分发渲染。
+//
+// Type 取值：
+//   - "progress"          引擎阶段进度（planner/human/researcher/writer 等）
+//   - "sources"           报告的来源列表
+//   - "report_chunk"      报告分片（流式）
+//   - "done"              研究完成（含最终报告 + 报告 ID）
+//   - "error"             错误
+//   - "human_feedback"    多智能体模式专属：要求用户对大纲给反馈
 type wsMessage struct {
-	Type     string      `json:"type"`                // progress / sources / done / error
-	Stage    string      `json:"stage,omitempty"`     // progress 专用：role/planning/searching/...
-	Message  string      `json:"message,omitempty"`   // 人类可读说明
-	Sources  []SourceDTO `json:"sources,omitempty"`   // sources/done 用
-	Report   string      `json:"report,omitempty"`    // done 用：报告正文
-	ReportID int64       `json:"report_id,omitempty"` // done 用：持久化后的报告 ID
+	Type         string      `json:"type"`                    // 帧语义
+	Stage        string      `json:"stage,omitempty"`         // progress 专用
+	Message      string      `json:"message,omitempty"`       // 人类可读说明
+	SectionTitle string      `json:"section_title,omitempty"` // progress 专用：当前章节（详细报告）
+	Sources      []SourceDTO `json:"sources,omitempty"`       // sources/done 用
+	Report       string      `json:"report,omitempty"`        // report_chunk/done 用：报告片段或全文
+	ReportID     int64       `json:"report_id,omitempty"`     // done 用：持久化后的报告 ID
+
+	// human_feedback 帧专属。
+	Title    string   `json:"title,omitempty"`    // 大纲标题
+	Sections []string `json:"sections,omitempty"` // 大纲分节
+	Revision int      `json:"revision,omitempty"` // 第几次要求审核（0 = 首次）
 }
 
 // handleResearch 处理 WebSocket 升级后的研究通信。
 //
 // 协议（对齐 gpt-researcher 的 /ws 思路）：
-//  1. 客户端连接后发一条 JSON：{"query":"研究问题"}
+//  1. 客户端连接后发一条 JSON：{"query":"研究问题", "mode":"multi"}
 //  2. 服务端跑研究引擎，实时推送 progress 帧
-//  3. 完成后推 sources + done（含报告全文与持久化 ID）
-//  4. 失败推 error；任意一方可关闭连接
+//  3. （多智能体专属）引擎在 human_review 节点触发 human_feedback 帧，
+//     客户端必须用 human_feedback_response 帧回复
+//  4. 完成后推 sources + done（含报告全文与持久化 ID）
+//  5. 失败推 error；任意一方可关闭连接
 //
-// WebSocket 是全双工长连接，没有 HTTP 的 idle 超时问题，
-// 研究过程中的长静默期（LLM 推理几十秒）也不会断连。
+// WebSocket 是全双工长连接，没有 HTTP 的 idle 超时问题。
+// 这里用了一个"读消息分发器"goroutine：首条消息是 query，
+// 之后所有消息都路由到 feedbackCh（供 human_feedback 帧的
+// 回调使用）。连接出错/关闭 → cancel() 中断引擎。
 func (s *Server) handleResearch(c *gin.Context) {
 	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		// 升级失败时 conn 为 nil，gorilla 已写入错误响应。
 		fmt.Fprintf(os.Stderr, "[WS] 升级失败: %v\n", err)
 		return
 	}
@@ -105,12 +141,38 @@ func (s *Server) handleResearch(c *gin.Context) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 监听客户端断开（conn.ReadMessage 阻塞读，出错即视为断开）。
+	// ---- WebSocket 读消息分发器 ----
+	//
+	// 首条消息（上面刚读过的 req）来自客户端。后续消息
+	// 只有一种语义：human_feedback_response。所以这个
+	// dispatcher 把后续消息路由到 feedbackCh，让
+	// HumanFeedbackFn 阻塞读取。
+	feedbackCh := make(chan *HumanFeedbackResponse, 1)
 	go func() {
+		defer close(feedbackCh)
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				cancel()
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				cancel() // 客户端断开 → 取消引擎
 				return
+			}
+			// Try to parse as human_feedback_response.
+			// Unknown messages are silently dropped (the
+			// client may also ping/pong; ignore those).
+			var resp HumanFeedbackResponse
+			if err := json.Unmarshal(msg, &resp); err != nil {
+				continue
+			}
+			if resp.Type != "human_feedback_response" {
+				continue
+			}
+			// Non-blocking send: if the channel is
+			// already full, the previous response is
+			// still being processed; drop the new one
+			// (caller is blocked on the channel read).
+			select {
+			case feedbackCh <- &resp:
+			default:
 			}
 		}
 	}()
@@ -129,20 +191,53 @@ func (s *Server) handleResearch(c *gin.Context) {
 			return
 		}
 		safeWrite(wsMessage{
-			Type:    "progress",
-			Stage:   string(p.Stage),
-			Message: p.Message,
+			Type:         "progress",
+			Stage:        string(p.Stage),
+			Message:      p.Message,
+			SectionTitle: p.SectionTitle,
 		})
 	}
 
 	// 流式报告回调：把每个生成块实时推给前端。
-	// 这样写报告期间连接持续有数据流动（report_chunk 帧），
-	// 不会因"等完整大响应"被判 idle 超时；前端也能逐字渲染报告。
 	onReportChunk := func(chunk, accu string) {
 		if ctx.Err() != nil {
 			return
 		}
 		safeWrite(wsMessage{Type: "report_chunk", Report: accu})
+	}
+
+	// 构造 researcher.Options。req.Mode 决定走单 Agent 还是
+	// 多智能体引擎（EngineRouter 根据 opts.Mode 路由）。
+	opts := &researcher.Options{
+		TaskID:     req.TaskID,
+		ReportType: researcher.ReportType(req.ReportType), // brief/detailed（仅单 Agent 生效）
+	}
+	if req.Mode != "" {
+		m := req.Mode
+		opts.Mode = &m
+	}
+	if req.Mode == "multi" {
+		opts.HumanFeedbackFn = makeHumanFeedbackFn(ctx, safeWrite, feedbackCh)
+		// req.HitL 是前端勾选框的状态。装到
+		// opts.EnableHITL，Engine.Run 会把它传到
+		// initial state，从而 human_review 节点能
+		// 决定是否真正阻塞（否则即使 fn 装了，
+		// 节点仍会因 enableHITL=false 自动 accept）。
+		hitlOn := req.HitL
+		opts.EnableHITL = &hitlOn
+	} else if req.Mode == "single" {
+		// Explicit single mode: no feedback fn.
+		opts.HumanFeedbackFn = nil
+		off := false
+		opts.EnableHITL = &off
+	}
+	// If mode is empty, opts.Mode is nil → engine fallbacks to default (cfg.Mode).
+
+	// 按 req.Mode 选引擎（multi 可能为 nil）。
+	engine, ok := s.pickEngine(req.Mode)
+	if !ok {
+		safeWrite(wsMessage{Type: "error", Message: "multi 模式不可用（构造失败或未启动），请改用 single"})
+		return
 	}
 
 	// 跑研究引擎（用 defer recover 防止 panic 直接断连）。
@@ -155,11 +250,11 @@ func (s *Server) handleResearch(c *gin.Context) {
 				cancel()
 			}
 		}()
-		report, err = s.engine.Run(ctx, req.Query, nil, onProgress, onReportChunk)
+		report, err = engine.Run(ctx, req.Query, opts, onProgress, onReportChunk)
 	}()
 	if err != nil {
 		if ctx.Err() != nil {
-			return // 客户端断开，不必再发
+			return // 客户端断开
 		}
 		safeWrite(wsMessage{Type: "error", Message: err.Error()})
 		return
@@ -183,8 +278,46 @@ func (s *Server) handleResearch(c *gin.Context) {
 		reportID = saved.ID
 	}
 
-	// 推送最终报告。
 	safeWrite(wsMessage{Type: "done", Report: report.Markdown, Sources: srcDTOs, ReportID: reportID})
+}
+
+// makeHumanFeedbackFn builds the callback the multi-agent
+// engine calls from its human_review node. The callback
+// sends a human_feedback frame over the WebSocket and then
+// blocks until the client posts a human_feedback_response,
+// or the context is cancelled (client disconnect).
+//
+// Concurrency: the WebSocket dispatcher goroutine writes
+// to feedbackCh. The engine Run() is a single goroutine
+// for a given WS connection. So the channel is 1-buffered
+// and the callback is the sole reader.
+func makeHumanFeedbackFn(
+	ctx context.Context,
+	safeWrite func(wsMessage),
+	feedbackCh <-chan *HumanFeedbackResponse,
+) researcher.HumanFeedbackFn {
+	return func(ctx context.Context, plan researcher.HumanReviewPlan) (string, error) {
+		// Send the human_feedback frame to the client.
+		safeWrite(wsMessage{
+			Type:     "human_feedback",
+			Title:    plan.Title,
+			Sections: plan.Sections,
+			Revision: plan.Revision,
+		})
+		// Block on the client's response or ctx cancel.
+		select {
+		case resp, ok := <-feedbackCh:
+			if !ok {
+				return "", ctx.Err()
+			}
+			if resp.Accept {
+				return "", nil
+			}
+			return resp.Notes, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
 }
 
 // writeWS 写一条 WebSocket 文本帧，出错静默忽略。

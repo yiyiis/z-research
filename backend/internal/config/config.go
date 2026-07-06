@@ -22,8 +22,18 @@ import (
 
 // Config 是 z-research 的全部可配置项。
 type Config struct {
-	APIKey   string // LLM 凭证（GLM/OpenAI/DeepSeek 等 OpenAI 兼容服务）
-	LLMBase  string
+	APIKey  string // LLM 凭证（GLM/OpenAI/DeepSeek 等 OpenAI 兼容服务）
+	LLMBase string
+
+	// --- 三档模型（对齐 gpt-researcher 的 fast/smart/strategic）---
+	// fast：选角色、JSON 结构化输出（planner/reviser/reviewer）等小任务，要求快。
+	// smart：主报告撰写（写正文、写章节），质量优先。
+	// strategic：深度规划、拆子主题（生成大纲/子查询），决定研究方向的杠杆点。
+	// 三档共享同一个 LLMBase 和 APIKey，只是模型名不同。
+	FastLLMModel      string // 默认 = LLMModel
+	SmartLLMModel     string // 默认 = LLMModel
+	StrategicLLMModel string // 默认 = LLMModel
+	// LLMModel 保留为兜底默认值（三档任一为空时回退到它）。
 	LLMModel string
 
 	// --- Embedding 配置（可与 LLM 不同来源，例如 LLM 用 GLM、Embedding 用自建 Ollama）---
@@ -37,19 +47,76 @@ type Config struct {
 	MaxScrapePerQuery    int     // 每子查询实际抓取的网页数
 	SimilarityThreshold  float64 // embedding 相似度过滤阈值
 	CompressionThreshold int     // 总字符低于此值则跳过压缩
-	TotalWords           int     // 报告目标字数
+	TotalWords           int     // 报告目标字数（简报）
 	Language             string  // 报告语言
-	Temperature          float64 // LLM 温度
-	Concurrency          int     // 子查询并发数
+	// SmartTokenLimit 是 smart 档（写报告）的 max_tokens 上限。
+	// 思考模型（MiniMax-M3 等）若不设，走 API 默认值（常只有 4096），
+	// 思考过程吃掉一大半后正文被截断。设大值（如 8192）避免报告写到一半断掉。
+	SmartTokenLimit int
+	Temperature     float64 // LLM 温度
+	Concurrency     int     // 子查询并发数
+
+	// --- 详细报告（多轮拆分）参数 ---
+	// MaxSections 复用多智能体的同名字段（默认 4）。
+	WordsPerSection int // 详细报告每章目标字数（默认 800）
+
+	// --- 抓取策略 ---
+	// ScraperStrategy: "auto"（默认，先 Jina 后 goquery）/ "jina" / "direct"。
+	// Jina 宕机或被墙时改 "direct" 可避免每个 URL 等待超时。
+	ScraperStrategy string
 
 	// --- 超时（防 LLM/embedding 服务端挂起导致死等）---
 	LLMTimeout   time.Duration // LLM 单次调用超时（思考模型写长报告较慢，默认 10 分钟）
 	EmbedTimeout time.Duration // Embedding 单次调用超时（默认 60s）
 
 	// --- 服务端配置 ---
-	HTTPAddr string // HTTP 监听地址，如 ":8080"
-	DBPath   string // SQLite 文件路径
+	HTTPAddr   string // HTTP 监听地址，如 ":8080"
+	DBPath     string // SQLite 文件路径
+	HTTPProxy  string // HTTP_PROXY，主进程启动时同步到 os.Setenv 让 http.Transport 走代理
+	HTTPSProxy string // HTTPS_PROXY，同上
+
+	// --- 多智能体配置（参考 gpt-researcher 的 STORM 架构）---
+	// 这些字段只在 Mode=ModeMulti 时生效；单 Agent 流程忽略。
+
+	// Mode 是 Engine 选择的入口："single"（默认，单 Agent）
+	// 或 "multi"（多智能体状态图编排）。可在请求级用
+	// researcher.Options.Mode 覆盖。
+	Mode string
+
+	// EnableHITL 开启 Human-in-the-loop 大纲审核。开启后
+	// Planner 完成后会阻塞等待用户在 WebSocket 上提交接受
+	// 或修改意见（直到 MaxPlanRevisions 次或 accept）。
+	// 关闭时自动 accept，简化调试。
+	EnableHITL bool
+
+	// MaxSections 限制 Planner 输出的分节数（对应 gpt-researcher
+	// 的 max_sections）。多智能体流程每个 section 都会触发一次
+	// 子图（reviewer↔reviser），值越大跑得越慢。
+	MaxSections int
+
+	// MaxPlanRevisions 限制 Human 重规划次数。超过后强制
+	// accept（避免死循环，对应 gpt-researcher 的
+	// DEFAULT_MAX_PLAN_REVISIONS=3）。
+	MaxPlanRevisions int
+
+	// MaxDraftRevisions 限制单 section 的 Reviewer/Reviser
+	// 自校正轮数。超过后强制接受当前草稿（避免 reviewer
+	// 永远不满意）。
+	MaxDraftRevisions int
+
+	// MaxRunSteps Eino graph 的总超步上限（Pregel 引擎
+	// 兜底）。建议设为 (MaxSections+2) * (MaxDraftRevisions+1)
+	// + 一些常数 headroom。
+	MaxRunSteps int
 }
+
+// Engine mode constants. Used in both Config.Mode and
+// Options.Mode. Single-mode is the default and matches the
+// behavior of z-research before the multi-agent refactor.
+const (
+	ModeSingle = "single"
+	ModeMulti  = "multi"
+)
 
 // 默认端点与模型（OpenAI 兼容）。
 const (
@@ -69,6 +136,10 @@ func LoadConfig() (*Config, error) {
 		APIKey:   os.Getenv("ZHIPU_API_KEY"),
 		LLMBase:  getenvDefault("LLM_BASE_URL", defaultLLMBase),
 		LLMModel: getenvDefault("LLM_MODEL", defaultLLMModel),
+		// 三档模型：优先读各自的 env，为空则回退到 LLMModel（单档兼容）。
+		FastLLMModel:      getenvDefault("FAST_LLM_MODEL", ""),
+		SmartLLMModel:     getenvDefault("SMART_LLM_MODEL", ""),
+		StrategicLLMModel: getenvDefault("STRATEGIC_LLM_MODEL", ""),
 
 		EmbedBase:   getenvDefault("EMBED_BASE_URL", defaultEmbedBase),
 		EmbedModel:  getenvDefault("EMBED_MODEL", defaultEmbedModel),
@@ -80,6 +151,9 @@ func LoadConfig() (*Config, error) {
 		SimilarityThreshold:  getenvFloat("SIMILARITY_THRESHOLD", 0.42),
 		CompressionThreshold: getenvInt("COMPRESSION_THRESHOLD", 8000),
 		TotalWords:           getenvInt("TOTAL_WORDS", 1200),
+		SmartTokenLimit:      getenvInt("SMART_TOKEN_LIMIT", 8192),
+		WordsPerSection:      getenvInt("WORDS_PER_SECTION", 800),
+		ScraperStrategy:      getenvDefault("SCRAPER_STRATEGY", "auto"),
 		Language:             getenvDefault("LANGUAGE", "zh"),
 		Temperature:          getenvFloat("TEMPERATURE", 0.35),
 		Concurrency:          getenvInt("CONCURRENCY", 3),
@@ -89,8 +163,28 @@ func LoadConfig() (*Config, error) {
 		LLMTimeout:   time.Duration(getenvInt("LLM_TIMEOUT_SECONDS", 600)) * time.Second,
 		EmbedTimeout: time.Duration(getenvInt("EMBED_TIMEOUT_SECONDS", 60)) * time.Second,
 
-		HTTPAddr: getenvDefault("HTTP_ADDR", ":8080"),
-		DBPath:   getenvDefault("DB_PATH", "data/z-research.db"),
+		HTTPAddr:   getenvDefault("HTTP_ADDR", ":8080"),
+		DBPath:     getenvDefault("DB_PATH", "data/z-research.db"),
+		HTTPProxy:  getenvDefault("HTTP_PROXY", ""),
+		HTTPSProxy: getenvDefault("HTTPS_PROXY", ""),
+
+		// --- 多智能体默认 ---
+		Mode: getenvDefault("ENGINE_MODE", ModeSingle),
+
+		EnableHITL: getenvBool("ENABLE_HITL", false),
+
+		MaxSections:       getenvInt("MAX_SECTIONS", 4),
+		MaxPlanRevisions:  getenvInt("MAX_PLAN_REVISIONS", 3),
+		MaxDraftRevisions: getenvInt("MAX_DRAFT_REVISIONS", 3),
+		// Eino MaxRunSteps 默认 = node 数 + 10。
+		// 多智能体外层图 ~6 节点 + 2 hitl 节点，内层 ~3 节点
+		// × MaxSections 个并行子图。粗估 80 步足够且能兜底。
+		MaxRunSteps: getenvInt("MAX_RUN_STEPS", 80),
+	}
+
+	if cfg.Mode != ModeSingle && cfg.Mode != ModeMulti {
+		return nil, fmt.Errorf("ENGINE_MODE 必须是 %q 或 %q，got %q",
+			ModeSingle, ModeMulti, cfg.Mode)
 	}
 
 	if cfg.APIKey == "" {
@@ -98,6 +192,16 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.Concurrency < 1 {
 		cfg.Concurrency = 1
+	}
+	// 三档模型回退：任一为空则用 LLMModel（保持单档配置的兼容性）。
+	if cfg.FastLLMModel == "" {
+		cfg.FastLLMModel = cfg.LLMModel
+	}
+	if cfg.SmartLLMModel == "" {
+		cfg.SmartLLMModel = cfg.LLMModel
+	}
+	if cfg.StrategicLLMModel == "" {
+		cfg.StrategicLLMModel = cfg.LLMModel
 	}
 	return cfg, nil
 }
@@ -122,6 +226,15 @@ func getenvFloat(key string, def float64) float64 {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
+		}
+	}
+	return def
+}
+
+func getenvBool(key string, def bool) bool {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return def

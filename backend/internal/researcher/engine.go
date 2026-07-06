@@ -25,9 +25,9 @@ type EngineIface interface {
 var _ EngineIface = (*Engine)(nil)
 
 // ChooseRole 让 LLM 根据查询给出领域专家角色设定（纯文本，非 JSON）。
-// 失败时返回错误，由调用方决定是否回退到默认角色。
+// 用 fast 档位（小任务，对应 gpt-researcher 的 choose_agent 用 fast_llm）。
 func ChooseRole(ctx context.Context, l *llm.LLM, query string) (string, error) {
-	role, err := l.Chat(ctx, prompts.ChooseAgentSystemPrompt(), prompts.ChooseAgentUserPrompt(query))
+	role, err := l.FastChat(ctx, prompts.ChooseAgentSystemPrompt(), prompts.ChooseAgentUserPrompt(query))
 	if err != nil {
 		return "", err
 	}
@@ -56,11 +56,21 @@ type FinalReport struct {
 	Sources  []Source `json:"sources"`  // 来源列表
 }
 
-// Run 执行完整研究流程：选角色 → 收集资料 → 撰写报告。
+// Run 执行完整研究流程，按 opts.ReportType 分派：
+//   - ReportBrief（默认）：选角色 → 收集资料 → 单次流式撰写简报。
+//   - ReportDetailed：选角色 → 收集初步资料 → 生成大纲 → 逐章独立检索+流式撰写 → 引言+结论 → 拼接。
 //
 // onProgress 可为 nil；非 nil 时用于上报各阶段进度。
 // 查询参数 opts 可覆盖默认配置（如 MaxIterations），为零值时沿用 cfg。
 func (e *Engine) Run(ctx context.Context, query string, opts *Options, onProgress EventFn, onReportChunk ReportChunkFn) (*FinalReport, error) {
+	if opts != nil && opts.ReportType == ReportDetailed {
+		return e.RunDetailed(ctx, query, opts, onProgress, onReportChunk)
+	}
+	return e.RunBrief(ctx, query, onProgress, onReportChunk)
+}
+
+// RunBrief 执行简报流程：选角色 → 收集资料 → 单次流式撰写。
+func (e *Engine) RunBrief(ctx context.Context, query string, onProgress EventFn, onReportChunk ReportChunkFn) (*FinalReport, error) {
 	emit := func(p Progress) {
 		if onProgress != nil {
 			onProgress(p)
@@ -123,4 +133,63 @@ func (e *Engine) Run(ctx context.Context, query string, opts *Options, onProgres
 type Options struct {
 	MaxIterations *int
 	TotalWords    *int
+
+	// ReportType 选择报告类型：ReportBrief（简报，默认）/ ReportDetailed（详细，多轮拆分）。
+	// 留空走 ReportBrief。单 Agent Engine 据此分派；multiagent 引擎忽略此字段。
+	ReportType ReportType
+
+	// Mode selects the engine implementation. nil or
+	// ModeSingle = the original single-agent Engine.
+	// ModeMulti = the multi-agent Engine (see
+	// internal/multiagent package). Single-agent Engine
+	// ignores this field.
+	Mode *string
+
+	// HumanFeedbackFn is invoked by the multi-agent
+	// engine's human_review node when EnableHITL is true
+	// in config. The callback receives the current plan
+	// (title + sections) and returns the user's free-form
+	// feedback (empty string = accept, non-empty = revise).
+	// Single-agent Engine ignores this field.
+	//
+	// The callback runs synchronously and may block for
+	// the duration of a human's review (e.g. waiting on
+	// a websocket message). The caller is responsible
+	// for honoring ctx cancellation.
+	HumanFeedbackFn HumanFeedbackFn
+
+	// TaskID is a stable identifier for this run, used by
+	// the multi-agent engine to persist + restore
+	// checkpoint state (via Eino's WithCheckPointStore).
+	// If empty, the multi-agent engine generates a
+	// random one. Single-agent Engine ignores this field.
+	TaskID string
+
+	// EnableHITL overrides cfg.EnableHITL for this run.
+	// When true (and the engine is multi-agent), the
+	// human_review node blocks until the user accepts
+	// or revises the plan. nil = use cfg.EnableHITL.
+	// The api layer reads this from ResearchRequest.HitL
+	// (set by the frontend HITL checkbox).
+	EnableHITL *bool
+}
+
+// HumanFeedbackFn is the callback signature the multi-agent
+// engine uses to ask the user for a plan review. The
+// implementation is provided by the API layer (typically by
+// reading a websocket message after writing the
+// "human_feedback" frame).
+//
+// The callback returns:
+//   - feedback: free-form text. Empty means "accept the plan
+//     as-is". Non-empty means "revise" with these instructions.
+//   - err: non-nil aborts the run.
+type HumanFeedbackFn func(ctx context.Context, plan HumanReviewPlan) (feedback string, err error)
+
+// HumanReviewPlan is the snapshot the multi-agent engine
+// hands to the HumanFeedbackFn callback.
+type HumanReviewPlan struct {
+	Title    string
+	Sections []string
+	Revision int // 0 on first review, 1 on first revise, etc.
 }

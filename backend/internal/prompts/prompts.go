@@ -79,3 +79,92 @@ func languageName(lang string) string {
 		return "中文"
 	}
 }
+
+// ===== 详细报告（多轮拆分）的 prompt =====
+// 对标 gpt-researcher 的 detailed_report：先大纲，再逐章独立检索+撰写。
+
+// OutlineSystemPrompt 指导 LLM 生成报告大纲。
+func OutlineSystemPrompt() string {
+	return `你是一位资深研究报告架构师。请为给定研究主题设计一份结构清晰的报告大纲。
+要求：
+- 围绕主题，拆分出相互独立、逻辑互补的章节；
+- 每个章节聚焦一个具体子主题，避免与"引言/结论/参考资料"这类通用章节重复；
+- 使用与主题一致的语言（中文主题用中文）；
+- 只输出一个 JSON 对象，格式：{"title":"报告总标题","sections":[{"title":"章节标题","desc":"该章一句话描述"}]}
+- 不要输出任何解释性文字或 markdown 代码块。`
+}
+
+// OutlineUserPrompt 构造生成大纲的 user 消息。n 为目标章节数。
+func OutlineUserPrompt(query, initialResearch string, n int) string {
+	return fmt.Sprintf("# 研究主题\n%s\n\n# 已收集的初步资料\n%s\n\n# 任务\n请生成 %d 个章节的大纲，仅输出 JSON。",
+		query, initialResearch, n)
+}
+
+// SectionSystemPrompt 构造撰写单章正文的 system 提示。
+// existingHeaders 用于去重（已写过的章节标题），避免章节间内容重复。
+func SectionSystemPrompt(role string, existingHeaders []string) string {
+	dedup := ""
+	if len(existingHeaders) > 0 {
+		dedup = fmt.Sprintf("\n\n重要：以下章节已涵盖，请勿重复其内容，只聚焦本章主题：%s",
+			strings.Join(existingHeaders, "、"))
+	}
+	return fmt.Sprintf(`%s
+
+你将基于提供的该章专属参考资料撰写本章正文。要求：
+1. 使用 Markdown，以二级标题（## 章节标题）开头；
+2. 内容严格基于参考资料，不编造；
+3. 引用具体信息时用 [n] 标注来源（n 对应资料中的编号）；
+4. 聚焦本章主题，不写其他章节的内容；%s`, role, dedup)
+}
+
+// SectionUserPrompt 构造撰写单章的 user 消息。
+func SectionUserPrompt(query, sectionTitle, sectionDesc, context string, wordsPerSection int) string {
+	return fmt.Sprintf(`# 总研究主题
+%s
+
+# 本章标题
+%s
+# 本章要点
+%s
+
+# 本章专属参考资料
+%s
+
+# 任务
+请基于上述资料撰写本章正文，约 %d 字。以 "## %s" 开头。`,
+		query, sectionTitle, sectionDesc, context, wordsPerSection, sectionTitle)
+}
+
+// IntroSystemPrompt 撰写引言的 system 提示。
+func IntroSystemPrompt(role string) string {
+	return fmt.Sprintf(`%s
+
+请为这份详细报告撰写一段引言（开头），要求：
+1. 使用 Markdown，以一级标题（# 报告标题）开头，接 "## 引言"；
+2. 简要介绍研究背景、报告要回答的核心问题、报告结构概览；
+3. 不展开具体数据，保持提纲挈领。`, role)
+}
+
+// IntroUserPrompt 构造写引言的 user 消息。outline 是大纲文本。
+func IntroUserPrompt(query, title, outline string) string {
+	return fmt.Sprintf("# 研究主题\n%s\n\n# 报告标题\n%s\n\n# 报告大纲\n%s\n\n# 任务\n请撰写引言。", query, title, outline)
+}
+
+// ConclusionSystemPrompt 撰写结论的 system 提示。
+func ConclusionSystemPrompt(role string) string {
+	return fmt.Sprintf(`%s
+
+请为这份详细报告撰写结论，要求：
+1. 使用 Markdown，以 "## 结论" 开头；
+2. 基于报告正文（已提供）总结核心发现与洞察；
+3. 不引入正文未提及的新信息。`, role)
+}
+
+// ConclusionUserPrompt 构造写结论的 user 消息。fullBody 是已生成的全部正文（引言+各章）。
+func ConclusionUserPrompt(query, fullBody string) string {
+	// 若正文过长，截断以避免超出上下文。
+	if len([]rune(fullBody)) > 12000 {
+		fullBody = string([]rune(fullBody)[:12000]) + "\n...(已截断)"
+	}
+	return fmt.Sprintf("# 研究主题\n%s\n\n# 报告正文（引言+各章）\n%s\n\n# 任务\n请撰写结论。", query, fullBody)
+}
