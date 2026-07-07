@@ -19,20 +19,21 @@ import (
 
 // Server 持有所有依赖，注册路由。
 //
-// 双引擎：single（单 Agent）+ multi（多智能体），按请求 opts.Mode 路由。
-// multi 可能为 nil（构造失败），前端选 multi 时报 503。
+// 三引擎：single（确定性工作流）+ multi（多智能体图）+ react（ReAct Agent），
+// 按请求 opts.Mode 路由。multi/react 可能为 nil（构造失败），前端选时报错。
 type Server struct {
 	singleEngine researcher.EngineIface
 	multiEngine  researcher.EngineIface // 可为 nil
+	reactEngine  researcher.EngineIface // 可为 nil（ReAct Agent）
 	store        store.Store
 }
 
 // NewServer 创建 HTTP 服务。
-func NewServer(single, multi researcher.EngineIface, st store.Store) *Server {
-	return &Server{singleEngine: single, multiEngine: multi, store: st}
+func NewServer(single, multi, react researcher.EngineIface, st store.Store) *Server {
+	return &Server{singleEngine: single, multiEngine: multi, reactEngine: react, store: st}
 }
 
-// pickEngine 按 Mode 选引擎：multi 路由到 multiEngine，单 engine 路由到 singleEngine。
+// pickEngine 按 Mode 选引擎。
 func (s *Server) pickEngine(mode string) (researcher.EngineIface, bool) {
 	switch mode {
 	case "multi":
@@ -40,6 +41,11 @@ func (s *Server) pickEngine(mode string) (researcher.EngineIface, bool) {
 			return nil, false
 		}
 		return s.multiEngine, true
+	case "react":
+		if s.reactEngine == nil {
+			return nil, false
+		}
+		return s.reactEngine, true
 	case "single", "":
 		return s.singleEngine, true
 	default:

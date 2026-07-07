@@ -50,7 +50,7 @@ func newTestServer(t *testing.T, eng researcher.EngineIface) (*Server, store.Sto
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	srv := NewServer(eng, nil, st) // 测试用 single engine；multi 传 nil
+	srv := NewServer(eng, nil, nil, st) // 测试用 single engine；multi/react 传 nil
 	return srv, st, srv.Router(false)
 }
 

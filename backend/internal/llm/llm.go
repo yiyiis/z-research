@@ -100,6 +100,10 @@ func NewLLM(ctx context.Context, cfg *config.Config) (*LLM, error) {
 // Embedder 返回底层 embedding 模型，供压缩器使用。
 func (l *LLM) Embedder() embedding.Embedder { return l.embed }
 
+// SmartModel 返回 smart 档的 ToolCallingChatModel，供 ReAct Agent 使用
+// （agent 需要 ToolCallingChatModel 来绑定工具）。
+func (l *LLM) SmartModel() model.ToolCallingChatModel { return l.smart }
+
 // chatWith 用指定档位的模型进行一次普通对话。
 func (l *LLM) chatWith(ctx context.Context, m model.ToolCallingChatModel, system, user string) (string, error) {
 	msgs := make([]*schema.Message, 0, 2)

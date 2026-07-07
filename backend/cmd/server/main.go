@@ -21,6 +21,7 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"z-research/backend/internal/agent"
 	"z-research/backend/internal/api"
 	"z-research/backend/internal/config"
 	"z-research/backend/internal/llm"
@@ -81,12 +82,12 @@ func main() {
 	}
 	defer st.Close()
 
-	// 把构造出来的两个引擎传给 NewServer（multi 可能为 nil）。
-	singleEngine, multiEngine, err := buildBothEngines(ctx, cfg, st)
+	// 把构造出来的三个引擎传给 NewServer（multi/react 可能为 nil）。
+	singleEngine, multiEngine, reactEngine, err := buildBothEngines(ctx, cfg, st)
 	if err != nil {
 		die(err)
 	}
-	srv := api.NewServer(singleEngine, multiEngine, st)
+	srv := api.NewServer(singleEngine, multiEngine, reactEngine, st)
 	r := srv.Router(*dev)
 
 	log.Printf("🚀 z-research 后端启动: http://localhost%s", cfg.HTTPAddr)
@@ -98,23 +99,21 @@ func main() {
 	}
 }
 
-// buildBothEngines 装配单 Agent + 多智能体两个引擎，返回给 router 按需分派。
+// buildBothEngines 装配 single + multi + react 三个引擎，返回给 router 按需分派。
 //
-// 单 Agent 引擎总是能构造成功。多智能体引擎如果构造失败
-// （例如 CheckPointStore 初始化出错），返回 (single, nil, nil)
-// ——前端选 multi 会报错，但 single 仍可用，不会让整个服务
-// 起不来。
-func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (researcher.EngineIface, researcher.EngineIface, error) {
+// single 总是构造成功。multi / react 若构造失败返回 nil（前端选对应模式时报错），
+// 但 single 仍可用，不会让整个服务起不来。
+func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, error) {
 	// 先设置抓取策略（Jina 宕机时可改 SCRAPER_STRATEGY=direct）。
 	scraper.SetStrategy(scraper.ScraperStrategy(cfg.ScraperStrategy))
 
 	llmClient, err := llm.NewLLM(ctx, cfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	searcher, err := search.NewSearcher(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	r := researcher.NewResearcher(cfg, llmClient, searcher)
 
@@ -125,14 +124,30 @@ func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (
 	multi, err := buildMultiAgentEngine(ctx, cfg, llmClient, r, st)
 	if err != nil {
 		log.Printf("⚠️  多智能体引擎构造失败，仅启用 single: %v", err)
-		return single, nil, nil
+		multi = nil
+	} else {
+		log.Printf("✅ 多智能体引擎就绪")
 	}
-	log.Printf("✅ 多智能体引擎就绪")
-	return single, multi, nil
+
+	// ReAct Agent 引擎：尝试构造，失败就退回 single。
+	reactEng, err := buildAgentEngine(ctx, cfg, llmClient, searcher)
+	if err != nil {
+		log.Printf("⚠️  ReAct Agent 引擎构造失败: %v", err)
+		reactEng = nil
+	} else {
+		log.Printf("✅ ReAct Agent 引擎就绪")
+	}
+
+	return single, multi, reactEng, nil
 }
 
 func buildMultiAgentEngine(ctx context.Context, cfg *config.Config, llmClient *llm.LLM, inner *researcher.Researcher, st store.Store) (researcher.EngineIface, error) {
 	return multiagent.NewEngine(ctx, cfg, llmClient, inner, st)
+}
+
+// buildAgentEngine 构造 ReAct Agent 引擎（LLM 自主调用搜索/抓取工具）。
+func buildAgentEngine(ctx context.Context, cfg *config.Config, llmClient *llm.LLM, searcher *search.Searcher) (researcher.EngineIface, error) {
+	return agent.NewAgentEngine(ctx, cfg, llmClient, searcher)
 }
 
 // runCLI 兼容旧用法：直接跑引擎打印报告。

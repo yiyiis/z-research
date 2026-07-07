@@ -61,7 +61,7 @@ export function useResearch() {
   // hitl: 是否启用多智能体模式的大纲审核（仅 multi 模式有效）
   const start = useCallback(async (
     query: string,
-    mode: 'single' | 'multi' | '' = '',
+    mode: 'single' | 'multi' | 'react' | '' = '',
     hitl: boolean = false,
     reportType: 'brief' | 'detailed' = 'brief',
   ) => {

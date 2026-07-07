@@ -15,10 +15,9 @@ export function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [viewing, setViewing] = useState<ReportDetail | null>(null)
 
-  // 引擎模式：'single'（默认，单 Agent）或 'multi'
-  // （多智能体状态图 + 可选 HITL）。'multi' 模式下服务端
-  // 会在 Planner 后发出 human_feedback 帧要求审核。
-  const [mode, setMode] = useState<'single' | 'multi'>('multi')
+  // 引擎模式：'single'（确定性工作流）或 'multi'（多智能体状态图 + HITL）
+  // 或 'react'（ReAct Agent，LLM 自主调用搜索/抓取工具）。
+  const [mode, setMode] = useState<'single' | 'multi' | 'react'>('multi')
   // 是否启用 HITL 大纲审核（仅 multi 模式有效）。
   // 启用时 Browser 节点会推送 initial_research 摘要；
   // Planner 完成后会阻塞等用户回复。
@@ -94,6 +93,18 @@ export function App() {
                 title="多智能体：Planner / Reviewer / Reviser / Writer 状态图（gpt-researcher 演进版）"
               >
                 多智能体
+              </button>
+              <button
+                onClick={() => setMode('react')}
+                disabled={isRunning}
+                className={`rounded-md px-2.5 py-1 font-medium ${
+                  mode === 'react'
+                    ? 'bg-white text-green-700 shadow'
+                    : 'text-gray-500 hover:text-gray-700'
+                } ${isRunning ? 'cursor-not-allowed opacity-50' : ''}`}
+                title="ReAct Agent：LLM 自主决定调用搜索/抓取工具、何时停止（真正的自主 Agent）"
+              >
+                Agent (ReAct)
               </button>
             </div>
           </div>

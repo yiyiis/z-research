@@ -30,9 +30,10 @@ export interface Source {
 
 // ResearchOptions 提交研究请求时的可选项。
 export interface ResearchOptions {
-  // 'single'（默认，单 Agent）或 'multi'（多智能体
-  // 状态图）。空字符串 = 走服务端 ENGINE_MODE 配置。
-  mode?: 'single' | 'multi' | ''
+  // 'single'（确定性工作流）或 'multi'（多智能体状态图）
+  // 或 'react'（ReAct Agent，LLM 自主调用工具）。
+  // 空字符串 = 走服务端 ENGINE_MODE 配置。
+  mode?: 'single' | 'multi' | 'react' | ''
   // 任务 ID（多智能体模式下用于检查点恢复）。
   task_id?: string
   // 多智能体模式下启用 Human-in-the-loop 大纲审核。
