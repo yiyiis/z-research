@@ -164,6 +164,12 @@ type Options struct {
 	// The api layer reads this from ResearchRequest.HitL
 	// (set by the frontend HITL checkbox).
 	EnableHITL *bool
+
+	// Breadth / Depth 是深度递归引擎 (deep) 的 per-run 参数。
+	// nil = 使用 cfg.DeepBreadth / cfg.DeepDepth。
+	// 其他引擎（single/multi/react）忽略这两个字段。
+	Breadth *int
+	Depth   *int
 }
 
 // HumanFeedbackFn is the callback signature the multi-agent
