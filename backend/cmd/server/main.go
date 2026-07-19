@@ -52,6 +52,9 @@ func main() {
 	_ = godotenv.Load()
 
 	cliQuery := flag.String("cli", "", "CLI 模式：直接研究并打印报告到 stdout（不启动 HTTP 服务）")
+	cliMode := flag.String("mode", "single", "CLI 模式引擎：single / multi / react / deep")
+	cliBreadth := flag.Int("breadth", 0, "CLI deep 模式 breadth（0=用 cfg.DeepBreadth）")
+	cliDepth := flag.Int("depth", 0, "CLI deep 模式 depth（0=用 cfg.DeepDepth）")
 	dev := flag.Bool("dev", true, "开发模式：启用宽松 CORS（前端 Vite dev server 跨域）")
 	flag.Parse()
 
@@ -62,7 +65,7 @@ func main() {
 
 	// CLI 模式。
 	if *cliQuery != "" {
-		runCLI(cfg, *cliQuery)
+		runCLI(cfg, *cliQuery, *cliMode, *cliBreadth, *cliDepth)
 		return
 	}
 
@@ -168,16 +171,62 @@ func buildDeepEngine(ctx context.Context, cfg *config.Config, llmClient *llm.LLM
 // runCLI 兼容旧用法：直接跑引擎打印报告。
 //
 // 不设超时（思考模型如 glm-5.1 写报告可能要数分钟），让它跑完。
-func runCLI(cfg *config.Config, query string) {
+//
+// mode: "single"（默认）/ "multi" / "react" / "deep"。
+// breadth/depth: 仅 deep 模式生效，0 = 用 cfg 默认值。
+func runCLI(cfg *config.Config, query, mode string, breadth, depth int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	engine, err := buildEngine(ctx, cfg)
+	scraper.SetStrategy(scraper.ScraperStrategy(cfg.ScraperStrategy))
+	llmClient, err := llm.NewLLM(ctx, cfg)
 	if err != nil {
 		die(err)
 	}
+	searcher, err := search.NewSearcher(ctx)
+	if err != nil {
+		die(err)
+	}
+	r := researcher.NewResearcher(cfg, llmClient, searcher)
 
-	report, err := engine.Run(ctx, query, nil, func(p researcher.Progress) {
+	// 按 mode 选引擎。
+	var engine researcher.EngineIface
+	switch mode {
+	case "deep":
+		engine = deep.NewEngine(cfg, llmClient, r)
+		fmt.Fprintf(os.Stderr, "🚀 深度递归引擎 (breadth=%d, depth=%d)\n", orDefault(breadth, cfg.DeepBreadth), orDefault(depth, cfg.DeepDepth))
+	case "multi":
+		m, e := multiagent.NewEngine(ctx, cfg, llmClient, r, nil)
+		if e != nil {
+			die(e)
+		}
+		engine = m
+		fmt.Fprintln(os.Stderr, "🚀 多智能体引擎")
+	case "react":
+		a, e := agent.NewAgentEngine(ctx, cfg, llmClient, searcher)
+		if e != nil {
+			die(e)
+		}
+		engine = a
+		fmt.Fprintln(os.Stderr, "🚀 ReAct Agent 引擎")
+	default:
+		engine = researcher.NewEngine(cfg, llmClient, r)
+		fmt.Fprintln(os.Stderr, "🚀 单 Agent 引擎")
+	}
+
+	// 构造 opts（仅 deep 模式传 breadth/depth）。
+	var opts *researcher.Options
+	if mode == "deep" {
+		opts = &researcher.Options{}
+		if breadth > 0 {
+			opts.Breadth = &breadth
+		}
+		if depth > 0 {
+			opts.Depth = &depth
+		}
+	}
+
+	report, err := engine.Run(ctx, query, opts, func(p researcher.Progress) {
 		msg := p.Message
 		if msg == "" {
 			msg = fmt.Sprintf("stage=%s subquery=%s url=%s found=%d", p.Stage, p.SubQuery, p.URL, p.Found)
@@ -192,20 +241,12 @@ func runCLI(cfg *config.Config, query string) {
 	fmt.Println(strings.Repeat("=", 60))
 }
 
-// buildEngine 装配研究引擎（LLM + Searcher + Researcher + Engine）。
-func buildEngine(ctx context.Context, cfg *config.Config) (*researcher.Engine, error) {
-	scraper.SetStrategy(scraper.ScraperStrategy(cfg.ScraperStrategy))
-
-	llmClient, err := llm.NewLLM(ctx, cfg)
-	if err != nil {
-		return nil, err
+// orDefault 返回 v（若 >0）否则 def。
+func orDefault(v, def int) int {
+	if v > 0 {
+		return v
 	}
-	searcher, err := search.NewSearcher(ctx)
-	if err != nil {
-		return nil, err
-	}
-	r := researcher.NewResearcher(cfg, llmClient, searcher)
-	return researcher.NewEngine(cfg, llmClient, r), nil
+	return def
 }
 
 func die(err error) {
