@@ -9,9 +9,10 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"sync"
 
 	"github.com/cloudwego/eino/components/embedding"
+
+	"z-research/backend/internal/workerpool"
 )
 
 // chunkSize / chunkOverlap 对齐 gpt-researcher 的 RecursiveCharacterTextSplitter 默认值。
@@ -70,6 +71,9 @@ func SplitText(text string, size, overlap int) []string {
 //  4. 将保留的块按原文顺序拼接返回。
 //
 // 当总字符数 < compressionThreshold 时直接返回原文（快路径，避免无谓的 embedding 调用）。
+//
+// embedWorkers 控制 chunk embedding 的并发上限（用统一的 workerpool）；
+// 传入 0 或负数时使用默认值 4。对应配置项 MAX_EMBED_WORKERS。
 func Compress(
 	ctx context.Context,
 	emb embedding.Embedder,
@@ -77,6 +81,7 @@ func Compress(
 	threshold float64,
 	topK int,
 	compressionThreshold int,
+	embedWorkers int,
 ) (string, error) {
 	if text == "" {
 		return "", nil
@@ -101,26 +106,26 @@ func Compress(
 	// 并发 embed 各 chunk（每个 chunk 独立请求，Ollama 可并行处理）。
 	// 实测：批量一次性 embed 长文本会很慢（Ollama 串行处理），
 	// 拆成并发单条请求可显著缩短总耗时。
-	const embedConcurrency = 4
+	// 并发上限统一走 workerpool（配置项 MAX_EMBED_WORKERS，默认 4）。
+	if embedWorkers <= 0 {
+		embedWorkers = 4
+	}
 	chunkVecs := make([][]float64, len(chunks))
 	errs := make([]error, len(chunks))
-	sem := make(chan struct{}, embedConcurrency)
-	var wg sync.WaitGroup
+	pool := workerpool.New(embedWorkers)
 	for i, chunk := range chunks {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, text string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			v, e := emb.EmbedStrings(ctx, []string{text})
+		i, chunk := i, chunk
+		pool.Go(ctx, func() error {
+			v, e := emb.EmbedStrings(ctx, []string{chunk})
 			if e != nil || len(v) != 1 {
 				errs[i] = e
-				return
+				return nil // 单个 chunk 失败不中断整体，错误在下方集中检查
 			}
 			chunkVecs[i] = v[0]
-		}(i, chunk)
+			return nil
+		})
 	}
-	wg.Wait()
+	_ = pool.Wait()
 
 	// 检查错误（任一 chunk 失败则整体失败，避免静默丢数据）。
 	for i, e := range errs {

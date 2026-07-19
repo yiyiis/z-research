@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"z-research/backend/internal/collection"
 	"z-research/backend/internal/llm"
 	"z-research/backend/internal/prompts"
 )
@@ -211,46 +212,10 @@ func outlineText(sections []OutlineSection) string {
 	return b.String()
 }
 
-// dedupSources 按去空后的列表返回（不重编号，保留原 N）。
-func dedupSources(in []Source) []Source {
-	if len(in) == 0 {
-		return nil
-	}
-	seen := make(map[string]bool, len(in))
-	out := make([]Source, 0, len(in))
-	for _, s := range in {
-		key := s.URL
-		if key == "" {
-			continue
-		}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, s)
-	}
-	return out
-}
-
-// mergeSources 把 newSrcs 合并到 existing（按 URL 去重），并重新连续编号。
-func mergeSources(existing []Source, newSrcs []Source) []Source {
-	seen := make(map[string]bool, len(existing))
-	out := make([]Source, 0, len(existing)+len(newSrcs))
-	for _, s := range existing {
-		if s.URL != "" && !seen[s.URL] {
-			seen[s.URL] = true
-			out = append(out, s)
-		}
-	}
-	for _, s := range newSrcs {
-		if s.URL != "" && !seen[s.URL] {
-			seen[s.URL] = true
-			out = append(out, s)
-		}
-	}
-	// 重新连续编号（1..N）。
-	for i := range out {
-		out[i].N = i + 1
-	}
-	return out
+// dedupSources / mergeSources 已迁移至 internal/collection 包
+// （collection.Dedup / collection.Merge），消除项目里 4 处重复的
+// URL 去重实现。这里保留薄封装以最小化调用方改动。
+func dedupSources(in []Source) []Source  { return collection.Dedup(in) }
+func mergeSources(existing, newSrcs []Source) []Source {
+	return collection.Merge(existing, newSrcs)
 }

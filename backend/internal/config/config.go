@@ -56,6 +56,23 @@ type Config struct {
 	Temperature     float64 // LLM 温度
 	Concurrency     int     // 子查询并发数
 
+	// --- 全局并发上限（面试话术关键词）---
+	// MaxScraperWorkers 是网页抓取的统一并发上限，对应 env MAX_SCRAPER_WORKERS。
+	// 所有引擎（single/multi/deep）的抓取都走 workerpool.New(MaxScraperWorkers)，
+	// 替代原本散落在 researcher.go 里的裸 channel 信号量。
+	// 默认 15，对齐面试话术里的 MAX_SCRAPER_WORKERS = 15。
+	MaxScraperWorkers int
+	// MaxEmbedWorkers 是 embedding 计算的并发上限（compress 包内部 workerpool）。
+	// 默认 4，对齐原硬编码 embedConcurrency。
+	MaxEmbedWorkers int
+
+	// --- 深度递归模式（deep）参数 ---
+	// DeepBreadth 是递归起始的子查询扇出数；每层按 max(2, breadth//2) 衰减。
+	// DeepDepth 是递归层数（depth=0 时退化为叶子研究，即普通 Conduct）。
+	// 成本随 breadth^depth 增长，默认 (4, 2) 较为温和。
+	DeepBreadth int
+	DeepDepth   int
+
 	// --- 详细报告（多轮拆分）参数 ---
 	// MaxSections 复用多智能体的同名字段（默认 4）。
 	WordsPerSection int // 详细报告每章目标字数（默认 800）
@@ -104,6 +121,17 @@ type Config struct {
 	// 永远不满意）。
 	MaxDraftRevisions int
 
+	// --- 多智能体：第三个循环（事实核查 + 可视化）---
+	// EnableFactCheck 开启后，writer 之后会插入 fact_checker 节点，
+	// 对报告正文（intro+data+conclusion，不看 URL/引用）做事实性校验。
+	// 不通过则路由回 writer 重写（最多 MaxFactCheckRevisions 轮）。
+	EnableFactCheck bool
+	// EnableVisualize 开启后，核查通过的报告会经过 visualizer 节点，
+	// 生成报告元数据（分节数/来源数/字数/核查摘要）+ 可选 mermaid 概览。
+	EnableVisualize bool
+	// MaxFactCheckRevisions 限制 fact_checker → writer 的重写轮数。
+	MaxFactCheckRevisions int
+
 	// MaxRunSteps Eino graph 的总超步上限（Pregel 引擎
 	// 兜底）。建议设为 (MaxSections+2) * (MaxDraftRevisions+1)
 	// + 一些常数 headroom。
@@ -116,6 +144,8 @@ type Config struct {
 const (
 	ModeSingle = "single"
 	ModeMulti  = "multi"
+	ModeReact  = "react"
+	ModeDeep   = "deep"
 )
 
 // 默认端点与模型（OpenAI 兼容）。
@@ -158,6 +188,14 @@ func LoadConfig() (*Config, error) {
 		Temperature:          getenvFloat("TEMPERATURE", 0.35),
 		Concurrency:          getenvInt("CONCURRENCY", 3),
 
+		// 全局并发上限（面试话术 MAX_SCRAPER_WORKERS = 15）。
+		MaxScraperWorkers: getenvInt("MAX_SCRAPER_WORKERS", 15),
+		MaxEmbedWorkers:   getenvInt("MAX_EMBED_WORKERS", 4),
+
+		// 深度递归模式默认参数（温和：breadth=4, depth=2）。
+		DeepBreadth: getenvInt("DEEP_BREADTH", 4),
+		DeepDepth:   getenvInt("DEEP_DEPTH", 2),
+
 		// 超时：LLM 默认 10 分钟（思考模型如 glm-5.1 写长报告可能要数分钟），Embedding 默认 60s。
 		// 用秒数配置（LLM_TIMEOUT_SECONDS / EMBED_TIMEOUT_SECONDS）。
 		LLMTimeout:   time.Duration(getenvInt("LLM_TIMEOUT_SECONDS", 600)) * time.Second,
@@ -176,15 +214,27 @@ func LoadConfig() (*Config, error) {
 		MaxSections:       getenvInt("MAX_SECTIONS", 4),
 		MaxPlanRevisions:  getenvInt("MAX_PLAN_REVISIONS", 3),
 		MaxDraftRevisions: getenvInt("MAX_DRAFT_REVISIONS", 3),
+
+		// 多智能体：第三个循环（fact_checker + visualizer）。
+		EnableFactCheck:       getenvBool("ENABLE_FACT_CHECK", false),
+		EnableVisualize:       getenvBool("ENABLE_VISUALIZE", false),
+		MaxFactCheckRevisions: getenvInt("MAX_FACT_CHECK_REVISIONS", 2),
+
 		// Eino MaxRunSteps 默认 = node 数 + 10。
 		// 多智能体外层图 ~6 节点 + 2 hitl 节点，内层 ~3 节点
 		// × MaxSections 个并行子图。粗估 80 步足够且能兜底。
 		MaxRunSteps: getenvInt("MAX_RUN_STEPS", 80),
 	}
 
-	if cfg.Mode != ModeSingle && cfg.Mode != ModeMulti {
-		return nil, fmt.Errorf("ENGINE_MODE 必须是 %q 或 %q，got %q",
-			ModeSingle, ModeMulti, cfg.Mode)
+	// ENGINE_MODE 放宽：允许 single/multi/react/deep。
+	// react/deep 在默认配置层不做强制校验，由 api.pickEngine 在运行时
+	// 根据是否成功构造决定可用性（构造失败会降级到 single）。
+	switch cfg.Mode {
+	case ModeSingle, ModeMulti, ModeReact, ModeDeep:
+		// ok
+	default:
+		return nil, fmt.Errorf("ENGINE_MODE 必须是 %q/%q/%q/%q，got %q",
+			ModeSingle, ModeMulti, ModeReact, ModeDeep, cfg.Mode)
 	}
 
 	if cfg.APIKey == "" {
@@ -192,6 +242,18 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.Concurrency < 1 {
 		cfg.Concurrency = 1
+	}
+	if cfg.MaxScraperWorkers < 1 {
+		cfg.MaxScraperWorkers = 15
+	}
+	if cfg.MaxEmbedWorkers < 1 {
+		cfg.MaxEmbedWorkers = 4
+	}
+	if cfg.DeepBreadth < 1 {
+		cfg.DeepBreadth = 4
+	}
+	if cfg.DeepDepth < 0 {
+		cfg.DeepDepth = 2
 	}
 	// 三档模型回退：任一为空则用 LLMModel（保持单档配置的兼容性）。
 	if cfg.FastLLMModel == "" {

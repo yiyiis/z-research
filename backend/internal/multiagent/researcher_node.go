@@ -24,6 +24,7 @@ import (
 
 	"github.com/cloudwego/eino/compose"
 
+	"z-research/backend/internal/collection"
 	"z-research/backend/internal/config"
 	"z-research/backend/internal/llm"
 	"z-research/backend/internal/researcher"
@@ -161,20 +162,9 @@ func gatherSectionMaterial(
 	return res.Context, res.Sources, nil
 }
 
-// dedupSources removes duplicate URLs from a source list,
-// preserving the first occurrence's citation number. The
-// returned slice re-numbers entries 1..N for stable
-// downstream rendering.
+// dedupSources 已迁移至 internal/collection 包。
+// 这里保留薄封装：多智能体场景需要"边去重边重编号 1..N"的语义，
+// 等价于 collection.Merge(nil, in)（合并到空基线后重新连续编号）。
 func dedupSources(in []researcher.Source) []researcher.Source {
-	seen := make(map[string]bool, len(in))
-	out := make([]researcher.Source, 0, len(in))
-	for _, s := range in {
-		if seen[s.URL] {
-			continue
-		}
-		seen[s.URL] = true
-		s.N = len(out) + 1
-		out = append(out, s)
-	}
-	return out
+	return collection.Merge(nil, in)
 }

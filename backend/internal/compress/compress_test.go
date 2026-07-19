@@ -46,7 +46,7 @@ func TestCosine(t *testing.T) {
 func TestCompress_FastPath(t *testing.T) {
 	// 用一个永远不该被调用的 embedder；若被调用则测试失败。
 	emb := &panickingEmbedder{}
-	out, err := Compress(nil, emb, "query", "短文本", 0.42, 5, 8000)
+	out, err := Compress(nil, emb, "query", "短文本", 0.42, 5, 8000, 4)
 	if err != nil {
 		t.Fatalf("快路径不应出错: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestCompress_FastPath(t *testing.T) {
 
 // TestCompress_EmptyText 空文本直接返回空。
 func TestCompress_EmptyText(t *testing.T) {
-	out, err := Compress(nil, nil, "q", "", 0.42, 5, 0)
+	out, err := Compress(nil, nil, "q", "", 0.42, 5, 0, 4)
 	if err != nil || out != "" {
 		t.Errorf("空文本应返回 (\"\", nil)，得到 (%q, %v)", out, err)
 	}

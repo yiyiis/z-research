@@ -6,12 +6,13 @@
 // 引擎通过 Progress 回调上报各阶段进度，供 CLI 与 HTTP/SSE 复用（见 engine.go）。
 package researcher
 
+import "z-research/backend/internal/collection"
+
 // Source 记录一条被引用的来源（带全局编号，用于报告中的 [n] 引用）。
-type Source struct {
-	N     int    `json:"n"`     // 引用编号，从 1 开始
-	URL   string `json:"url"`   // 来源 URL
-	Title string `json:"title"` // 来源标题
-}
+//
+// 真正的定义在 collection 包（跨引擎共享），这里保留为类型别名以维持
+// 向后兼容——调用方仍可使用 researcher.Source。
+type Source = collection.Source
 
 // Result 是一次研究的产出。
 type Result struct {
