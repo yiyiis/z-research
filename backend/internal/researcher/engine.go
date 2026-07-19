@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cloudwego/eino/compose"
+
+	"z-research/backend/internal/collection"
 	"z-research/backend/internal/config"
 	"z-research/backend/internal/llm"
 	"z-research/backend/internal/prompts"
@@ -39,15 +42,30 @@ func ChooseRole(ctx context.Context, l *llm.LLM, query string) (string, error) {
 
 // Engine 把"选角色 → 收集资料 → 撰写报告"三步封装成可复用的顶层流程，
 // 供 CLI 与 HTTP handler 共用。它通过 Progress 回调上报各阶段进度。
+//
+// 单 Agent 简报流程（RunBrief）通过一个 5 节点 Eino compose.Graph 编排：
+//
+//	START → choose_role → plan_search → parallel_research → compression → writer → END
+//
+// 该 graph 在 NewEngine 时 Compile 一次（开销大），Run 时反复 Invoke。
+// 详细报告流程（RunDetailed）仍是串行多轮拆分，未走 graph（保留旧行为）。
 type Engine struct {
 	cfg        *config.Config
 	llm        *llm.LLM
 	researcher *Researcher
+	// runnable 是单 Agent 简报流程的 5 节点 graph 编译产物。
+	runnable compose.Runnable[string, string]
 }
 
-// NewEngine 创建顶层研究引擎。
+// NewEngine 创建顶层研究引擎，并编译单 Agent 5 节点 graph。
+// 编译失败会 panic（启动期错误，应尽早暴露）。
 func NewEngine(cfg *config.Config, l *llm.LLM, r *Researcher) *Engine {
-	return &Engine{cfg: cfg, llm: l, researcher: r}
+	g := BuildSingleGraph(context.Background(), cfg, l, r)
+	runnable, err := g.Compile(context.Background(), compose.WithMaxRunSteps(cfg.MaxRunSteps))
+	if err != nil {
+		panic(fmt.Errorf("compile single-agent graph: %w", err))
+	}
+	return &Engine{cfg: cfg, llm: l, researcher: r, runnable: runnable}
 }
 
 // FinalReport 是 Run 的最终产出（含报告正文与来源列表）。
@@ -69,64 +87,38 @@ func (e *Engine) Run(ctx context.Context, query string, opts *Options, onProgres
 	return e.RunBrief(ctx, query, onProgress, onReportChunk)
 }
 
-// RunBrief 执行简报流程：选角色 → 收集资料 → 单次流式撰写。
+// RunBrief 执行简报流程：通过 5 节点 Eino compose.Graph 编排
+//
+//	START → choose_role → plan_search → parallel_research → compression → writer → END
+//
+// Graph 在 NewEngine 时编译一次，这里反复 Invoke。per-run 的 query、
+// 回调、来源列表通过 WithInitialState 注入 context，由 choose_role
+// 节点的 StatePreHandler 拷进 graph 的 per-run *ResearchState。
+//
+// 由于 graph 的输出只有 string（最终报告正文），Sources 无法直接从
+// Invoke 返回值取出。这里通过把 sources 闭包捕获到 initial state 里，
+// parallel_research 节点写入 state.Visited 后我们再读 Visited.All() 拿回。
 func (e *Engine) RunBrief(ctx context.Context, query string, onProgress EventFn, onReportChunk ReportChunkFn) (*FinalReport, error) {
-	emit := func(p Progress) {
-		if onProgress != nil {
-			onProgress(p)
-		}
+	// initial state 通过 context 注入 graph。
+	initial := &ResearchState{
+		Query:          query,
+		TotalWords:     e.cfg.TotalWords,
+		OnProgress:     onProgress,
+		OnReportChunk:  onReportChunk,
+		Visited:        nil, // pre-handler 会创建
 	}
+	ctx = WithInitialState(ctx, initial)
 
-	// ---- 阶段 1：选角色 ----
-	role, err := ChooseRole(ctx, e.llm, query)
-	if err != nil {
-		// 角色生成失败不致命，退化为通用研究员。
-		role = "你是一名严谨的研究助理，擅长基于资料客观地撰写研究报告。"
-		emit(Progress{Stage: StageRole, Message: fmt.Sprintf("角色生成失败，使用默认角色: %v", err)})
-	} else {
-		emit(Progress{Stage: StageRole, Message: role})
-	}
-
-	// ---- 阶段 2：收集资料 ----
-	res, err := e.researcher.Conduct(ctx, query, onProgress)
+	report, err := e.runnable.Invoke(ctx, query)
 	if err != nil {
 		return nil, err
 	}
-
-	// ---- 阶段 3：流式撰写报告 ----
-	emit(Progress{Stage: StageWriting, Message: "正在撰写报告……"})
-
-	// 用流式生成：LLM 边生成边吐块，连接持续有数据流动，避免等完整大响应被判 idle 超时。
-	// 每个块通过 onReportChunk 实时推给前端（对齐 gpt-researcher 的 stream=True）。
-	ch, err := e.llm.ChatStream(ctx,
-		prompts.ReportSystemPrompt(role, e.cfg.Language),
-		prompts.ReportUserPrompt(query, res.Context, e.cfg.TotalWords),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("撰写报告失败（流式启动）: %w", err)
+	// 从共享 VisitedSet 拿回最终来源列表。
+	sources := []collection.Source(nil)
+	if initial.Visited != nil {
+		sources = initial.Visited.All()
 	}
-
-	var reportBuilder strings.Builder
-	for chunk := range ch {
-		reportBuilder.WriteString(chunk)
-		if onReportChunk != nil {
-			onReportChunk(chunk, reportBuilder.String())
-		}
-	}
-	report := reportBuilder.String()
-	if strings.TrimSpace(report) == "" {
-		return nil, fmt.Errorf("撰写报告失败: 模型返回空内容")
-	}
-
-	// 若报告中缺少"参考资料"段，补一份来源清单（保证可溯源）。
-	if !strings.Contains(report, "参考资料") && len(res.Sources) > 0 {
-		report = strings.TrimRight(report, "\n") + "\n\n## 参考资料\n"
-		for _, s := range res.Sources {
-			report += fmt.Sprintf("%d. %s — %s\n", s.N, s.Title, s.URL)
-		}
-	}
-
-	return &FinalReport{Markdown: report, Sources: res.Sources}, nil
+	return &FinalReport{Markdown: report, Sources: sources}, nil
 }
 
 // Options 允许在单次 Run 中覆盖默认配置（未来扩展用，当前预留）。

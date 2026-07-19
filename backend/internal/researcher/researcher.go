@@ -56,15 +56,41 @@ func (r *Researcher) ConductWithVisited(ctx context.Context, query string, bread
 	}
 
 	// ---- 阶段 1：规划子查询 ----
+	subQueries, err := r.PlanSubQueries(ctx, query, breadth)
+	if err != nil {
+		return nil, err
+	}
+	emit(Progress{Stage: StagePlanning, Message: fmt.Sprintf("规划完成，共 %d 个子查询", len(subQueries))})
+
+	// ---- 阶段 2/3：并发执行 + 合并上下文 ----
+	return r.RunSubQueries(ctx, subQueries, visited, onProgress)
+}
+
+// PlanSubQueries 用 LLM 把查询拆成 N 个子查询（导出版本，供 graph 节点复用）。
+//
+// breadth ≤0 时使用 cfg.MaxIterations（默认 3）。
+// 这一层支持深度递归的逐层衰减：调用方传入 max(2, prevBreadth//2)。
+// 始终会把原始 query 也作为一条子查询追加（对齐 gpt-researcher）。
+func (r *Researcher) PlanSubQueries(ctx context.Context, query string, breadth int) ([]string, error) {
 	subQueries, err := r.planSubQueries(ctx, query, breadth)
 	if err != nil {
 		return nil, err
 	}
-	// 始终把原始查询也作为一条子查询（对齐 gpt-researcher）。
-	subQueries = appendUnique(subQueries, query)
-	emit(Progress{Stage: StagePlanning, Message: fmt.Sprintf("规划完成，共 %d 个子查询", len(subQueries))})
+	return appendUnique(subQueries, query), nil
+}
 
-	// ---- 阶段 2：并发执行每个子查询的 {search → fetch → compress} ----
+// RunSubQueries 并发执行一批子查询的 {search → fetch → compress}，
+// 把各自的文本块合并成最终 Context。它不调用报告生成 LLM。
+//
+// 这是 5 节点 Graph 的 parallel_research 节点的核心实现，
+// 也供深度递归引擎的叶子研究复用。
+func (r *Researcher) RunSubQueries(ctx context.Context, subQueries []string, visited *collection.VisitedSet, onProgress EventFn) (*Result, error) {
+	emit := func(p Progress) {
+		if onProgress != nil {
+			onProgress(p)
+		}
+	}
+
 	// 子查询之间的并发由 errgroup.SetLimit(cfg.Concurrency) 控制。
 	// 单子查询内部的网页抓取并发由全局 workerpool(cfg.MaxScraperWorkers) 控制。
 	g, gctx := errgroup.WithContext(ctx)
@@ -92,7 +118,6 @@ func (r *Researcher) ConductWithVisited(ctx context.Context, query string, bread
 		return nil, fmt.Errorf("并发研究阶段出错: %w", err)
 	}
 
-	// ---- 阶段 3：合并上下文 ----
 	if len(contextBlocks) == 0 {
 		return nil, fmt.Errorf("未能收集到任何有效资料，请检查网络或更换查询后重试")
 	}
@@ -100,7 +125,7 @@ func (r *Researcher) ConductWithVisited(ctx context.Context, query string, bread
 	return &Result{Context: contextStr, Sources: visited.All()}, nil
 }
 
-// planSubQueries 用 LLM 把查询拆成 N 个子查询。
+// planSubQueries 用 LLM 把查询拆成 N 个子查询（内部实现，不含 appendUnique 原始查询）。
 //
 // breadth ≤0 时使用 cfg.MaxIterations（默认 3）。
 // 这一层支持深度递归的逐层衰减：调用方传入 max(2, prevBreadth//2)。
