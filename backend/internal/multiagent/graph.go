@@ -51,10 +51,21 @@ const (
 	NodeResearcher = "researcher"
 	NodeWriter     = "writer"
 
+	// 第三个循环：事实核查 + 可视化 + 发布。
+	// 仅当 cfg.EnableFactCheck=true 时 writer 之后才会接 fact_checker；
+	// fact_checker 通过则路由到 visualizer（若 EnableVisualize）或 publisher。
+	NodeFactChecker = "fact_checker"
+	NodeVisualizer  = "visualizer"
+	NodePublisher   = "publisher"
+
 	// Branch targets. Used both as graph node keys and
 	// as the strings returned by branch conditions.
-	BranchAccept = NodeResearcher
-	BranchRevise = NodePlanner
+	BranchAccept = NodeResearcher // human_review accept → researcher
+	BranchRevise = NodePlanner    // human_review revise → planner
+
+	// Fact-check branch targets.
+	FactBranchAccept = NodeVisualizer // fact_checker pass → visualizer
+	FactBranchRevise = NodeWriter     // fact_checker fail → writer 重写
 )
 
 // defaultReviewerGuidelines is the per-section review
@@ -377,6 +388,128 @@ func BuildOuterGraph(
 		panic(fmt.Errorf("add writer: %w", err))
 	}
 
+	// --- Fact checker node (第三个循环，受 cfg.EnableFactCheck 开关控制) ---
+	// 对齐 session 设计：fact_checker 只看报告正文（intro+data+conclusion），
+	// 不看 URL 不看引用。核查通过路由到 visualizer，不通过路由回 writer 重写。
+	// 上限 MaxFactCheckRevisions，到达后强制通过（避免死循环）。
+	// 注意：此节点仅在 EnableFactCheck=true 时被接入图拓扑（见下方边装配）。
+	factCheckerNode := compose.InvokableLambda(
+		func(ctx context.Context, _ string) (string, error) {
+			var (
+				report     string
+				rounds     int
+				maxRounds  int
+			)
+			_ = compose.ProcessState[*ResearchState](ctx, func(_ context.Context, s *ResearchState) error {
+				report = s.Report
+				rounds = s.FactCheckRounds
+				maxRounds = cfg.MaxFactCheckRevisions
+				return nil
+			})
+			if maxRounds <= 0 {
+				maxRounds = 2
+			}
+			// 上限保护：到达后强制通过。
+			if rounds >= maxRounds {
+				if s := OnProgressFromContext(ctx); s != nil {
+					s("fact_checker", fmt.Sprintf("已达事实核查上限 %d 轮，强制通过", maxRounds))
+				}
+				return factPassSentinel, nil
+			}
+			if s := OnProgressFromContext(ctx); s != nil {
+				s("fact_checker", fmt.Sprintf("正在进行第 %d 轮事实核查", rounds+1))
+			}
+			result, err := FactCheck(ctx, llmClient, report)
+			if err != nil {
+				return "", err
+			}
+			// 写回核查报告与轮数。
+			_ = compose.ProcessState[*ResearchState](ctx, func(_ context.Context, st *ResearchState) error {
+				st.FactCheckReport = result.Report
+				if result.Verdict != "pass" {
+					st.FactCheckRounds = rounds + 1
+				}
+				return nil
+			})
+			if result.Verdict == "pass" {
+				if s := OnProgressFromContext(ctx); s != nil {
+					s("fact_checker", "事实核查通过")
+				}
+				return factPassSentinel, nil
+			}
+			if s := OnProgressFromContext(ctx); s != nil {
+				s("fact_checker", "事实核查未通过，回 writer 重写")
+			}
+			// 返回非 sentinel 的任意字符串（核查报告）→ 路由回 writer。
+			// 把核查报告作为传递给 writer 的 data，writer 会读 state 重写。
+			return result.Report, nil
+		},
+	)
+	if err := g.AddLambdaNode(NodeFactChecker, factCheckerNode, compose.WithNodeName(NodeFactChecker)); err != nil {
+		panic(fmt.Errorf("add fact_checker: %w", err))
+	}
+
+	// --- Visualizer node (受 cfg.EnableVisualize 开关控制) ---
+	// 接收核查通过的报告，生成元数据 + 可选 mermaid 概览。
+	visualizerNode := compose.InvokableLambda(
+		func(ctx context.Context, _ string) (string, error) {
+			var (
+				title  string
+				report string
+			)
+			_ = compose.ProcessState[*ResearchState](ctx, func(_ context.Context, s *ResearchState) error {
+				title = s.Title
+				report = s.Report
+				return nil
+			})
+			if s := OnProgressFromContext(ctx); s != nil {
+				s("visualizer", "正在生成报告可视化概览")
+			}
+			visuals, err := Visualize(ctx, llmClient, title, report)
+			if err != nil {
+				return "", err
+			}
+			_ = compose.ProcessState[*ResearchState](ctx, func(_ context.Context, st *ResearchState) error {
+				st.Visuals = visuals
+				return nil
+			})
+			return visuals, nil
+		},
+	)
+	if err := g.AddLambdaNode(NodeVisualizer, visualizerNode, compose.WithNodeName(NodeVisualizer)); err != nil {
+		panic(fmt.Errorf("add visualizer: %w", err))
+	}
+
+	// --- Publisher node (终节点，组装最终输出) ---
+	// 把 report + 核查摘要 + 可视化元数据 + sources 拼成最终输出。
+	// 同时解决 Sources 未回传 FinalReport 的 TODO（通过 state 传递）。
+	publisherNode := compose.InvokableLambda(
+		func(ctx context.Context, _ string) (string, error) {
+			var (
+				report      string
+				factReport  string
+				visuals     string
+				sources     []researcher.Source
+			)
+			_ = compose.ProcessState[*ResearchState](ctx, func(_ context.Context, s *ResearchState) error {
+				report = s.Report
+				factReport = s.FactCheckReport
+				visuals = s.Visuals
+				sources = s.Sources
+				return nil
+			})
+			final := Publish(report, factReport, visuals, sources)
+			_ = compose.ProcessState[*ResearchState](ctx, func(_ context.Context, st *ResearchState) error {
+				st.Report = final
+				return nil
+			})
+			return final, nil
+		},
+	)
+	if err := g.AddLambdaNode(NodePublisher, publisherNode, compose.WithNodeName(NodePublisher)); err != nil {
+		panic(fmt.Errorf("add publisher: %w", err))
+	}
+
 	// --- Branch on human: accept→researcher, revise→planner ---
 	// MUST be added after researcher + writer nodes are
 	// registered because Eino's AddBranch validates that
@@ -417,16 +550,49 @@ func BuildOuterGraph(
 	if err := g.AddEdge(NodeResearcher, NodeWriter); err != nil {
 		panic(fmt.Errorf("edge researcher->writer: %w", err))
 	}
-	// Writer is the terminal node; Eino requires an
-	// explicit edge to END (it does not auto-infer END
-	// for nodes with no outgoing edges — confirmed by
-	// compile error "end node not set" without this
-	// edge). The human branch's "accept" arm and the
-	// researcher->writer edge both reach Writer; the
-	// human branch's "revise" arm cycles back to
-	// planner.
-	if err := g.AddEdge(NodeWriter, compose.END); err != nil {
-		panic(fmt.Errorf("edge writer->END: %w", err))
+
+	// ---- 第三个循环的边装配（受开关控制） ----
+	// 模式 A（默认，EnableFactCheck=false）: writer → END（保持旧行为）
+	// 模式 B（EnableFactCheck=true, EnableVisualize=false）: writer → fact_checker → [pass: publisher / fail: writer] → END
+	// 模式 C（EnableFactCheck=true, EnableVisualize=true）: writer → fact_checker → [pass: visualizer / fail: writer] → publisher → END
+	if cfg.EnableFactCheck {
+		if err := g.AddEdge(NodeWriter, NodeFactChecker); err != nil {
+			panic(fmt.Errorf("edge writer->fact_checker: %w", err))
+		}
+		// fact-check 分支：pass → 下游(visualizer 或 publisher)，fail → writer。
+		var acceptTarget string
+		if cfg.EnableVisualize {
+			acceptTarget = NodeVisualizer
+		} else {
+			acceptTarget = NodePublisher
+		}
+		factBranch := compose.NewGraphBranch(
+			func(_ context.Context, in string) (string, error) {
+				if in == factPassSentinel {
+					return acceptTarget, nil
+				}
+				return NodeWriter, nil
+			},
+			map[string]bool{acceptTarget: true, NodeWriter: true},
+		)
+		if err := g.AddBranch(NodeFactChecker, factBranch); err != nil {
+			panic(fmt.Errorf("add fact_check branch: %w", err))
+		}
+		// visualizer → publisher（若启用），否则 accept arm 直接是 publisher。
+		if cfg.EnableVisualize {
+			if err := g.AddEdge(NodeVisualizer, NodePublisher); err != nil {
+				panic(fmt.Errorf("edge visualizer->publisher: %w", err))
+			}
+		}
+		// publisher 是终点。
+		if err := g.AddEdge(NodePublisher, compose.END); err != nil {
+			panic(fmt.Errorf("edge publisher->END: %w", err))
+		}
+	} else {
+		// 模式 A：保持现状，writer 直接是终点。
+		if err := g.AddEdge(NodeWriter, compose.END); err != nil {
+			panic(fmt.Errorf("edge writer->END: %w", err))
+		}
 	}
 
 	return g

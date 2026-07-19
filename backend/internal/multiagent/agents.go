@@ -404,3 +404,100 @@ func AssembleReport(title string, layout *ReportLayout, sections []string, draft
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
+
+// ---- 第三个循环：事实核查（fact_checker） ----
+
+// FactCheckResult 是 fact_checker 节点的产出。
+type FactCheckResult struct {
+	// Verdict: "pass" 表示核查通过；"fail" 表示存在需要重写的问题。
+	// 路由信号据此决定：pass → factPassSentinel → visualizer；fail → 核查报告 → writer。
+	Verdict string `json:"verdict"`
+	// Report 是给 writer 的修订建议（中文），verdict=pass 时为空。
+	Report string `json:"report"`
+}
+
+// FactCheck 让 LLM 对报告正文做事实性校验。
+//
+// 对齐 session 设计的关键约束：
+//   - 只看报告正文（intro + 各 section data + conclusion），
+//     不看 URL、不看引用编号。这意味着核查基于"论断本身是否自洽/
+//     是否与常识冲突"，而非"引用是否真实存在"。
+//   - 用 fast 档位（结构化短输出，类似 reviewer）。
+//
+// 返回的 FactCheckResult.Verdict 决定 graph 路由。
+func FactCheck(ctx context.Context, l *llm.LLM, report string) (*FactCheckResult, error) {
+	raw, err := l.FastChat(ctx, FactCheckerSystemPrompt, FactCheckerUserPrompt(report))
+	if err != nil {
+		return nil, fmt.Errorf("fact_checker llm: %w", err)
+	}
+	jsonStr := llm.ExtractJSON(raw)
+	var out struct {
+		Verdict string `json:"verdict"`
+		Report  string `json:"report"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &out); err != nil {
+		return nil, fmt.Errorf("fact_checker json parse (raw=%q): %w",
+			llm.Truncate(raw, 200), err)
+	}
+	// 规范化 verdict：任何非明确 pass 的都视为 fail（保守策略）。
+	if strings.EqualFold(strings.TrimSpace(out.Verdict), "pass") {
+		out.Verdict = "pass"
+	} else {
+		out.Verdict = "fail"
+	}
+	return &FactCheckResult{Verdict: out.Verdict, Report: out.Report}, nil
+}
+
+// ---- 可视化（visualizer） ----
+
+// Visualize 让 LLM 从完整报告抽取元数据 + 可选 mermaid 概览。
+//
+// 用 smart 档位（需要从全文理解结构）。产出的 Visuals 字符串会被
+// publisher 附加到最终报告末尾。
+func Visualize(ctx context.Context, l *llm.LLM, title, report string) (string, error) {
+	raw, err := l.Chat(ctx, VisualizerSystemPrompt, VisualizerUserPrompt(title, report))
+	if err != nil {
+		return "", fmt.Errorf("visualizer llm: %w", err)
+	}
+	return strings.TrimSpace(raw), nil
+}
+
+// ---- 发布（publisher） ----
+
+// Publish 是 publisher 节点的核心：把报告正文 + 核查摘要 + 可视化元数据
+// 组装成最终输出。纯函数，不调 LLM。
+//
+// 这是解决 engine.go:180 "Sources 未回传 FinalReport" TODO 的接入点：
+// publisher 把 Sources 也编码进最终输出（通过 state 传递，由 Engine.Run
+// 从 state 取出）。当前实现把核查摘要与可视化作为附录附加。
+func Publish(report, factCheckReport, visuals string, sources []researcher.Source) string {
+	var b strings.Builder
+	b.WriteString(report)
+	appended := false
+	// 事实核查摘要附录（仅当核查未完全通过时才有内容）。
+	if strings.TrimSpace(factCheckReport) != "" {
+		b.WriteString("\n\n## 事实核查纪要\n\n")
+		b.WriteString(factCheckReport)
+		appended = true
+	}
+	// 可视化元数据附录。
+	if strings.TrimSpace(visuals) != "" {
+		if !appended {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n## 报告元数据\n\n")
+		b.WriteString(visuals)
+		appended = true
+	}
+	// 来源列表（若原报告未包含）。
+	if !strings.Contains(report, "参考资料") && len(sources) > 0 {
+		if !appended {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n## 参考资料\n\n")
+		for _, s := range sources {
+			fmt.Fprintf(&b, "%d. %s — %s\n", s.N, s.Title, s.URL)
+		}
+	}
+	return b.String()
+}

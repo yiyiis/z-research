@@ -262,3 +262,58 @@ You MUST return nothing but a JSON in the following format (without json markdow
 %s
 `, query, researchDataJSON, WriterSystemPromptSampleSchema)
 }
+
+// ---- 事实核查（fact_checker） ----
+
+// FactCheckerSystemPrompt 是 fact_checker 节点的 system prompt。
+//
+// 对齐 session 设计的关键约束：只看报告正文（intro + 各 section + conclusion），
+// 不看 URL、不看引用编号。判断的是"论断本身是否自洽/是否与常识冲突"，
+// 而非"引用是否真实存在"。
+const FactCheckerSystemPrompt = `You are a meticulous fact checker for a research report. You review ONLY the prose of the report (introduction, section bodies, conclusion). You do NOT see and do NOT care about the source URLs or citation numbers.
+
+Your job: identify factual claims that are self-contradictory, conflict with widely-accepted public knowledge, or are otherwise implausible. Flag concrete numbers, dates, names, and causal claims specifically.
+
+Return ONLY a JSON object:
+{
+  "verdict": "pass" | "fail",
+  "report": "<if fail: a concise Chinese list of the problematic claims and how to fix them; if pass: empty string>"
+}
+
+"pass" means no issues found. "fail" means at least one claim needs the writer to revise. When in doubt, prefer "fail" with specific notes.`
+
+// FactCheckerUserPrompt 构造 fact_checker 的 user 消息（只含报告正文）。
+func FactCheckerUserPrompt(reportBody string) string {
+	return fmt.Sprintf(`Please fact-check the following research report body (introduction + sections + conclusion). Ignore any source URLs or [n] citation markers — judge only the prose claims.
+
+Report body:
+%s
+`, reportBody)
+}
+
+// ---- 可视化（visualizer） ----
+
+// VisualizerSystemPrompt 是 visualizer 节点的 system prompt。
+// 产出报告元数据 + 可选 mermaid 概览图。
+const VisualizerSystemPrompt = `You are a research report visualizer. Given a finished research report, produce a concise Chinese metadata block + (if useful) a mermaid diagram summarizing the report's structure or key relationships.
+
+Output format (plain markdown, no JSON):
+- 一行报告标题
+- 分节数 / 来源数 / 字数（粗略估计）
+- 一句话核心结论
+- 可选：一个 mermaid 代码块（如 mindmap / flowchart），仅当报告结构适合可视化时才给`
+
+// VisualizerUserPrompt 构造 visualizer 的 user 消息。
+func VisualizerUserPrompt(title, report string) string {
+	// 报告可能很长，截断到 ~4000 字符避免 token 爆炸（visualizer 只需结构概览）。
+	body := report
+	if len([]rune(body)) > 4000 {
+		body = string([]rune(body)[:4000])
+	}
+	return fmt.Sprintf(`Report title: %s
+
+Report content:
+%s
+
+Please produce the metadata block + optional mermaid overview as instructed.`, title, body)
+}

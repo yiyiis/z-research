@@ -37,6 +37,12 @@ const acceptSentinel = "__ACCEPT__"
 // cares that the value differs from acceptSentinel.
 const reviseSentinel = "__REVISE__"
 
+// factPassSentinel 是 fact_checker 节点"核查通过"时返回的路由信号。
+// 与 acceptSentinel 同理：必须非空字符串，否则 Eino Pregel 视为"无数据"，
+// 图会终止且输出为空。fact_checker 节点核查通过时 return 此常量 → 路由到
+// visualizer；不通过时返回 LLM 的核查报告文本 → 路由回 writer 重写。
+const factPassSentinel = "__FACT_OK__"
+
 // ResearchState is the shared per-run state of the outer
 // multi-agent graph (planner → human_review → researcher →
 // writer). The graph's I/O type is the research plan + final
@@ -79,6 +85,21 @@ type ResearchState struct {
 	// Report is the final markdown report, set by the
 	// Writer node. The graph's I/O type is this string.
 	Report string
+
+	// ---- 第三个循环：事实核查（fact_checker ↔ writer） ----
+	// FactCheckReport 是 fact_checker 节点产出的事实核查摘要
+	// （哪些论断 unsupported / disputed，以及修订建议）。空表示通过。
+	// 对齐 session 设计：fact_checker 只看报告正文（intro+data+conclusion），
+	// 不看 URL 不看引用。
+	FactCheckReport string
+	// FactCheckRounds 计数 writer 已被 fact_checker 打回重写的次数，
+	// 受 MaxFactCheckRevisions 限制。到达上限后强制 accept。
+	FactCheckRounds int
+
+	// ---- 可视化与发布（visualizer / publisher） ----
+	// Visuals 是 visualizer 节点产出的报告元数据 + 可选 mermaid 概览。
+	// publisher 节点会把它附加到最终输出。
+	Visuals string
 
 	// CurrentSectionIndex, while the graph is running, holds
 	// the index of the section being processed. Used by the
