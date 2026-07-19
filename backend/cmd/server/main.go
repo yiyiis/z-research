@@ -24,6 +24,7 @@ import (
 	"z-research/backend/internal/agent"
 	"z-research/backend/internal/api"
 	"z-research/backend/internal/config"
+	"z-research/backend/internal/deep"
 	"z-research/backend/internal/llm"
 	"z-research/backend/internal/multiagent"
 	"z-research/backend/internal/researcher"
@@ -82,12 +83,12 @@ func main() {
 	}
 	defer st.Close()
 
-	// 把构造出来的三个引擎传给 NewServer（multi/react 可能为 nil）。
-	singleEngine, multiEngine, reactEngine, err := buildBothEngines(ctx, cfg, st)
+	// 把构造出来的四个引擎传给 NewServer（multi/react/deep 可能为 nil）。
+	singleEngine, multiEngine, reactEngine, deepEngine, err := buildBothEngines(ctx, cfg, st)
 	if err != nil {
 		die(err)
 	}
-	srv := api.NewServer(singleEngine, multiEngine, reactEngine, st)
+	srv := api.NewServer(singleEngine, multiEngine, reactEngine, deepEngine, st)
 	r := srv.Router(*dev)
 
 	log.Printf("🚀 z-research 后端启动: http://localhost%s", cfg.HTTPAddr)
@@ -99,21 +100,21 @@ func main() {
 	}
 }
 
-// buildBothEngines 装配 single + multi + react 三个引擎，返回给 router 按需分派。
+// buildBothEngines 装配 single + multi + react + deep 四个引擎，返回给 router 按需分派。
 //
-// single 总是构造成功。multi / react 若构造失败返回 nil（前端选对应模式时报错），
+// single 总是构造成功。multi / react / deep 若构造失败返回 nil（前端选对应模式时报错），
 // 但 single 仍可用，不会让整个服务起不来。
-func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, error) {
+func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, error) {
 	// 先设置抓取策略（Jina 宕机时可改 SCRAPER_STRATEGY=direct）。
 	scraper.SetStrategy(scraper.ScraperStrategy(cfg.ScraperStrategy))
 
 	llmClient, err := llm.NewLLM(ctx, cfg)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	searcher, err := search.NewSearcher(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	r := researcher.NewResearcher(cfg, llmClient, searcher)
 
@@ -138,7 +139,16 @@ func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (
 		log.Printf("✅ ReAct Agent 引擎就绪")
 	}
 
-	return single, multi, reactEng, nil
+	// 深度递归引擎：尝试构造，失败就退回 single。
+	deepEng, err := buildDeepEngine(ctx, cfg, llmClient, r)
+	if err != nil {
+		log.Printf("⚠️  深度递归引擎构造失败: %v", err)
+		deepEng = nil
+	} else {
+		log.Printf("✅ 深度递归引擎就绪 (breadth=%d, depth=%d)", cfg.DeepBreadth, cfg.DeepDepth)
+	}
+
+	return single, multi, reactEng, deepEng, nil
 }
 
 func buildMultiAgentEngine(ctx context.Context, cfg *config.Config, llmClient *llm.LLM, inner *researcher.Researcher, st store.Store) (researcher.EngineIface, error) {
@@ -148,6 +158,11 @@ func buildMultiAgentEngine(ctx context.Context, cfg *config.Config, llmClient *l
 // buildAgentEngine 构造 ReAct Agent 引擎（LLM 自主调用搜索/抓取工具）。
 func buildAgentEngine(ctx context.Context, cfg *config.Config, llmClient *llm.LLM, searcher *search.Searcher) (researcher.EngineIface, error) {
 	return agent.NewAgentEngine(ctx, cfg, llmClient, searcher)
+}
+
+// buildDeepEngine 构造深度递归引擎（Lambda 节点内递归，breadth 逐层衰减）。
+func buildDeepEngine(ctx context.Context, cfg *config.Config, llmClient *llm.LLM, inner *researcher.Researcher) (researcher.EngineIface, error) {
+	return deep.NewEngine(cfg, llmClient, inner), nil
 }
 
 // runCLI 兼容旧用法：直接跑引擎打印报告。

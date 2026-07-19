@@ -19,18 +19,26 @@ import (
 
 // Server 持有所有依赖，注册路由。
 //
-// 三引擎：single（确定性工作流）+ multi（多智能体图）+ react（ReAct Agent），
-// 按请求 opts.Mode 路由。multi/react 可能为 nil（构造失败），前端选时报错。
+// 四引擎：single（确定性工作流）+ multi（多智能体图）+ react（ReAct Agent）
+// + deep（深度递归），按请求 opts.Mode 路由。
+// multi/react/deep 可能为 nil（构造失败），前端选时报错。
 type Server struct {
 	singleEngine researcher.EngineIface
 	multiEngine  researcher.EngineIface // 可为 nil
 	reactEngine  researcher.EngineIface // 可为 nil（ReAct Agent）
+	deepEngine   researcher.EngineIface // 可为 nil（深度递归）
 	store        store.Store
 }
 
 // NewServer 创建 HTTP 服务。
-func NewServer(single, multi, react researcher.EngineIface, st store.Store) *Server {
-	return &Server{singleEngine: single, multiEngine: multi, reactEngine: react, store: st}
+func NewServer(single, multi, react, deep researcher.EngineIface, st store.Store) *Server {
+	return &Server{
+		singleEngine: single,
+		multiEngine:  multi,
+		reactEngine:  react,
+		deepEngine:   deep,
+		store:        st,
+	}
 }
 
 // pickEngine 按 Mode 选引擎。
@@ -46,6 +54,11 @@ func (s *Server) pickEngine(mode string) (researcher.EngineIface, bool) {
 			return nil, false
 		}
 		return s.reactEngine, true
+	case "deep":
+		if s.deepEngine == nil {
+			return nil, false
+		}
+		return s.deepEngine, true
 	case "single", "":
 		return s.singleEngine, true
 	default:
@@ -65,6 +78,14 @@ func extractTitle(markdown, query string) string {
 		return string([]rune(query)[:40]) + "..."
 	}
 	return query
+}
+
+// modeOrSingle 把空 mode 显示为 "single"，用于错误文案。
+func modeOrSingle(mode string) string {
+	if mode == "" {
+		return "single"
+	}
+	return mode
 }
 
 // toDTO 把 researcher.Source 转为 SourceDTO。
@@ -236,13 +257,17 @@ func (s *Server) handleResearch(c *gin.Context) {
 		opts.HumanFeedbackFn = nil
 		off := false
 		opts.EnableHITL = &off
+	} else if req.Mode == "deep" {
+		// 深度递归：per-run breadth/depth（前端可调）。
+		opts.Breadth = req.Breadth
+		opts.Depth = req.Depth
 	}
 	// If mode is empty, opts.Mode is nil → engine fallbacks to default (cfg.Mode).
 
-	// 按 req.Mode 选引擎（multi 可能为 nil）。
+	// 按 req.Mode 选引擎（multi/react/deep 可能为 nil）。
 	engine, ok := s.pickEngine(req.Mode)
 	if !ok {
-		safeWrite(wsMessage{Type: "error", Message: "multi 模式不可用（构造失败或未启动），请改用 single"})
+		safeWrite(wsMessage{Type: "error", Message: fmt.Sprintf("%s 模式不可用（构造失败或未启动），请改用 single", modeOrSingle(req.Mode))})
 		return
 	}
 

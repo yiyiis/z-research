@@ -30,10 +30,11 @@ export interface Source {
 
 // ResearchOptions 提交研究请求时的可选项。
 export interface ResearchOptions {
-  // 'single'（确定性工作流）或 'multi'（多智能体状态图）
-  // 或 'react'（ReAct Agent，LLM 自主调用工具）。
+  // 'single'（确定性工作流）/ 'multi'（多智能体状态图）
+  // / 'react'（ReAct Agent，LLM 自主调用工具）
+  // / 'deep'（深度递归，Lambda 节点内递归）。
   // 空字符串 = 走服务端 ENGINE_MODE 配置。
-  mode?: 'single' | 'multi' | 'react' | ''
+  mode?: 'single' | 'multi' | 'react' | 'deep' | ''
   // 任务 ID（多智能体模式下用于检查点恢复）。
   task_id?: string
   // 多智能体模式下启用 Human-in-the-loop 大纲审核。
@@ -42,6 +43,11 @@ export interface ResearchOptions {
   // 大纲的 accept/revise 回复。
   // 关闭时（默认）所有阶段自动 accept，调试用。
   hitl?: boolean
+  // 深度递归模式（mode='deep'）的 per-run 参数。
+  // breadth: 递归起始扇出数（默认 4，每层按 max(2, b//2) 衰减）
+  // depth: 递归层数（默认 2）
+  breadth?: number
+  depth?: number
 }
 
 // HumanFeedbackPayload 客户端 → 服务端：用户对大纲的反馈。
@@ -88,22 +94,29 @@ function wsURL(): string {
 // 通过回调返回的 reply 函数回发响应。
 export async function runResearch(
   query: string,
-  mode: 'single' | 'multi' | '' = '',
+  mode: 'single' | 'multi' | 'react' | 'deep' | '' = '',
   hitl: boolean = false,
   reportType: 'brief' | 'detailed' = 'brief',
   cb: ResearchCallbacks,
+  opts?: { breadth?: number; depth?: number },
 ): Promise<void> {
   return new Promise<void>((resolve) => {
     const ws = new WebSocket(wsURL())
 
     ws.onopen = () => {
       // 连接建立后发送研究请求。
-      ws.send(JSON.stringify({
+      const payload: Record<string, unknown> = {
         query,
         mode: mode ?? '',
         hitl,
         report_type: reportType,
-      }))
+      }
+      // 深度递归模式的 per-run 参数（仅 deep 模式生效）。
+      if (mode === 'deep' && opts) {
+        if (typeof opts.breadth === 'number') payload.breadth = opts.breadth
+        if (typeof opts.depth === 'number') payload.depth = opts.depth
+      }
+      ws.send(JSON.stringify(payload))
     }
 
     ws.onmessage = (ev) => {

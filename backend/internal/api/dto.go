@@ -12,7 +12,8 @@ package api
 // ResearchRequest 是 WebSocket 客户端发来的研究请求。
 //
 // Mode: "single"（默认，单 Agent）或 "multi"（多智能体
-// 状态图）。空字符串 = 走服务端配置 ENGINE_MODE。
+// 状态图）或 "react"（ReAct Agent）或 "deep"（深度递归）。
+// 空字符串 = 走服务端配置 ENGINE_MODE。
 //
 // HitL: 多智能体模式下启用 Human-in-the-loop 大纲审核。
 // 开启后 Browser 节点跑完会立即把 initial_research
@@ -24,6 +25,9 @@ package api
 // 研究请求生成一个 UUID，服务端用它持久化 state；
 // 中断后用同 TaskID 重启可从断点续跑（实验性，
 // 阶段 5 完成时启用）。
+//
+// Breadth/Depth: 仅深度递归模式（mode="deep"）生效。
+// 控制递归起始扇出与层数。nil = 用 cfg.DeepBreadth/DeepDepth。
 type ResearchRequest struct {
 	Query  string `json:"query"`
 	Mode   string `json:"mode,omitempty"`
@@ -34,6 +38,10 @@ type ResearchRequest struct {
 	//   "brief"（默认，简报）或 "detailed"（详细，多轮拆分长报告）。
 	// 多智能体模式忽略此字段（它本身就是详细报告流程）。
 	ReportType string `json:"report_type,omitempty"`
+
+	// 深度递归模式（mode="deep"）的 per-run 参数。指针类型以区分"未传"和"零值"。
+	Breadth *int `json:"breadth,omitempty"`
+	Depth   *int `json:"depth,omitempty"`
 }
 
 // HumanFeedbackResponse 是 WebSocket 客户端对服务端

@@ -16,12 +16,18 @@ export function App() {
   const [viewing, setViewing] = useState<ReportDetail | null>(null)
 
   // 引擎模式：'single'（确定性工作流）或 'multi'（多智能体状态图 + HITL）
-  // 或 'react'（ReAct Agent，LLM 自主调用搜索/抓取工具）。
-  const [mode, setMode] = useState<'single' | 'multi' | 'react'>('multi')
+  // 或 'react'（ReAct Agent，LLM 自主调用搜索/抓取工具）
+  // 或 'deep'（深度递归，Lambda 节点内递归，breadth 逐层衰减）。
+  const [mode, setMode] = useState<'single' | 'multi' | 'react' | 'deep'>('multi')
   // 是否启用 HITL 大纲审核（仅 multi 模式有效）。
   // 启用时 Browser 节点会推送 initial_research 摘要；
   // Planner 完成后会阻塞等用户回复。
   const [hitl, setHitl] = useState(true)
+  // 深度递归模式参数（仅 deep 模式有效）。
+  // breadth: 递归起始扇出（默认 4，每层按 max(2, b//2) 衰减）
+  // depth: 递归层数（默认 2）
+  const [deepBreadth, setDeepBreadth] = useState(4)
+  const [deepDepth, setDeepDepth] = useState(2)
 
   // 报告完成后，刷新历史列表。
   useEffect(() => {
@@ -39,14 +45,16 @@ export function App() {
     }
   }, [])
 
-  // 开始新研究时清空查看态，并把当前 mode + hitl + reportType 传给引擎。
+  // 开始新研究时清空查看态，并把当前 mode + hitl + reportType + deepOpts 传给引擎。
   const handleStart = useCallback(
     (q: string, reportType: 'brief' | 'detailed') => {
       setViewing(null)
       setSelectedId(null)
-      start(q, mode, hitl, reportType)
+      // 仅 deep 模式传 deepOpts，其余模式传 undefined。
+      const deepOpts = mode === 'deep' ? { breadth: deepBreadth, depth: deepDepth } : undefined
+      start(q, mode, hitl, reportType, deepOpts)
     },
-    [start, mode, hitl],
+    [start, mode, hitl, deepBreadth, deepDepth],
   )
 
   // 决定右侧展示的报告内容：正在查看历史 → 历史；否则 → 当前研究产出。
@@ -106,6 +114,18 @@ export function App() {
               >
                 Agent (ReAct)
               </button>
+              <button
+                onClick={() => setMode('deep')}
+                disabled={isRunning}
+                className={`rounded-md px-2.5 py-1 font-medium ${
+                  mode === 'deep'
+                    ? 'bg-white text-purple-700 shadow'
+                    : 'text-gray-500 hover:text-gray-700'
+                } ${isRunning ? 'cursor-not-allowed opacity-50' : ''}`}
+                title="深度递归：Lambda 节点内递归，breadth 逐层衰减 max(2, b//2)，基于 learnings 追问（OpenAI Deep Research 风格）"
+              >
+                深度递归
+              </button>
             </div>
           </div>
 
@@ -126,6 +146,40 @@ export function App() {
                 </span>
               </span>
             </label>
+          )}
+
+          {/* 深度递归参数（仅 deep 模式有效） */}
+          {mode === 'deep' && (
+            <div className="mb-3 flex flex-wrap items-center gap-4 text-xs text-gray-600">
+              <span className="font-medium text-gray-800">深度递归参数</span>
+              <label className="flex items-center gap-1.5">
+                <span className="text-gray-500">breadth（起始扇出）</span>
+                <input
+                  type="number"
+                  min={2}
+                  max={8}
+                  value={deepBreadth}
+                  disabled={isRunning}
+                  onChange={(e) => setDeepBreadth(Math.max(2, Math.min(8, Number(e.target.value) || 4)))}
+                  className="w-14 rounded border border-gray-300 px-1.5 py-0.5 text-gray-800 disabled:bg-gray-100"
+                />
+              </label>
+              <label className="flex items-center gap-1.5">
+                <span className="text-gray-500">depth（递归层数）</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={3}
+                  value={deepDepth}
+                  disabled={isRunning}
+                  onChange={(e) => setDeepDepth(Math.max(0, Math.min(3, Number(e.target.value) || 2)))}
+                  className="w-14 rounded border border-gray-300 px-1.5 py-0.5 text-gray-800 disabled:bg-gray-100"
+                />
+              </label>
+              <span className="text-gray-400">
+                每层 breadth 按 max(2, b//2) 衰减；成本随 breadth^depth 增长
+              </span>
+            </div>
           )}
 
           <QueryInput onSubmit={handleStart} onCancel={cancel} running={isRunning} />
@@ -167,6 +221,13 @@ export function App() {
                   <div>输入一个问题，开始多智能体研究</div>
                   <div className="mt-1 text-xs text-gray-300">
                     Planner 出大纲 → 你审核 → 分节深度检索 → Reviewer/Reviser 自校正 → Writer 汇编
+                  </div>
+                </div>
+              ) : mode === 'deep' ? (
+                <div className="text-center">
+                  <div>输入一个问题，开始深度递归研究</div>
+                  <div className="mt-1 text-xs text-gray-300">
+                    breadth={deepBreadth} / depth={deepDepth} · 每层按 max(2, b//2) 衰减 · 基于 learnings 追问 · 跨层共享 visited_urls
                   </div>
                 </div>
               ) : (

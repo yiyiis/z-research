@@ -57,13 +57,15 @@ export function useResearch() {
   // submitFeedback 在用户点击面板按钮时回发响应。
   const replyRef = useRef<((accept: boolean, notes?: string) => void) | null>(null)
 
-  // mode: 'single' | 'multi' | ''
+  // mode: 'single' | 'multi' | 'react' | 'deep' | ''
   // hitl: 是否启用多智能体模式的大纲审核（仅 multi 模式有效）
+  // deepOpts: 深度递归模式的 breadth/depth（仅 deep 模式有效）
   const start = useCallback(async (
     query: string,
-    mode: 'single' | 'multi' | 'react' | '' = '',
+    mode: 'single' | 'multi' | 'react' | 'deep' | '' = '',
     hitl: boolean = false,
     reportType: 'brief' | 'detailed' = 'brief',
+    deepOpts?: { breadth?: number; depth?: number },
   ) => {
     const trimmed = query.trim()
     if (!trimmed) return
@@ -114,7 +116,7 @@ export function useResearch() {
         // 把 reply 存到 ref，供面板组件调用。
         replyRef.current = reply
       },
-    }, { mode, hitl })
+    }, deepOpts)
     // 连接关闭后清掉 reply ref。
     replyRef.current = null
   }, [])
