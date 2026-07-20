@@ -6,12 +6,15 @@ import { SourceList } from './components/SourceList'
 import { HistoryPanel, getReport } from './components/HistoryPanel'
 import { EvaluationBadge } from './components/EvaluationBadge'
 import { HumanFeedbackPanel } from './components/HumanFeedbackPanel'
+import { ReviseInput } from './components/ReviseInput'
 import { useResearch } from './hooks/useResearch'
+import { useRevision } from './hooks/useRevision'
 import type { ReportDetail } from './api/research'
 
 // App 主布局：左侧历史报告列表 + 右侧研究工作区。
 export function App() {
   const { state, start, submitFeedback, cancel } = useResearch()
+  const { state: revision, startRevision } = useRevision()
   const [historyKey, setHistoryKey] = useState(0) // 触发历史列表刷新
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [viewing, setViewing] = useState<ReportDetail | null>(null)
@@ -59,7 +62,11 @@ export function App() {
   )
 
   // 决定右侧展示的报告内容：正在查看历史 → 历史；否则 → 当前研究产出。
-  const showReport = viewing?.content ?? state.report
+  // 显示优先级：修改中的报告 > 查看历史 > 当前研究报告。
+  // 修改会话激活时（revision.status 不是 idle），展示修改流式报告。
+  const showReport = revision.status !== 'idle' && revision.currentReport
+    ? revision.currentReport
+    : (viewing?.content ?? state.report)
   const showSources = viewing?.sources ?? state.sources
 
   const isRunning = state.status === 'running' || state.status === 'awaiting_feedback'
@@ -216,6 +223,16 @@ export function App() {
               <SourceList sources={showSources} />
               {/* 流量计费展示：仅当前研究完成（非查看历史）时显示 */}
               {!viewing && state.usage && <UsageBadge usage={state.usage} />}
+              {/* 对话式修改区：当前研究报告完成（有 reportId）且非查看历史时显示 */}
+              {!viewing && state.status === 'done' && state.reportId && (
+                <ReviseInput
+                  onSubmit={(instruction) => startRevision(state.reportId!, instruction, showReport)}
+                  running={revision.status === 'revising'}
+                  messages={revision.messages}
+                  progress={revision.progress}
+                  lastAction={revision.lastAction}
+                />
+              )}
             </>
           )}
 

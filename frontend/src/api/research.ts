@@ -262,3 +262,94 @@ export async function deleteReport(id: number): Promise<void> {
   const resp = await fetch(`${API_BASE}/api/reports/${id}`, { method: 'DELETE' })
   if (!resp.ok) throw new Error(`删除失败: ${resp.status}`)
 }
+
+// ---- 报告对话式修改（/ws/revise 独立端点）----
+
+// ReviseMessage 是多轮对话的一条消息。
+export interface ReviseMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+// ReviseCallbacks 是修改过程中的各类 WS 消息回调。
+export interface ReviseCallbacks {
+  onProgress?: (stage: string, message: string) => void
+  onSources?: (sources: Source[]) => void
+  // 流式修改：每收到一个块就回调，report 是累积到当前的完整报告。
+  onChunk?: (report: string) => void
+  onDone?: (result: { report: string; reportId: number; action: string }) => void
+  onError?: (message: string) => void
+}
+
+// reviseWsURL 返回 /ws/revise 的完整 URL。
+function reviseWsURL(): string {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${window.location.host}/ws/revise`
+}
+
+// runRevise 建立 /ws/revise 连接，发送修改请求，逐帧回调。
+//
+// 协议：首帧发 revise_request(report_id+instruction+history)，
+// 服务端流式返回 revise_progress/revise_sources/revise_chunk/revise_done。
+export async function runRevise(
+  reportId: number,
+  instruction: string,
+  history: ReviseMessage[],
+  cb: ReviseCallbacks,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const ws = new WebSocket(reviseWsURL())
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        type: 'revise_request',
+        report_id: reportId,
+        instruction,
+        history,
+      }))
+    }
+
+    ws.onmessage = (ev) => {
+      let m: WSMessage
+      try {
+        m = JSON.parse(ev.data)
+      } catch {
+        return
+      }
+      switch (m.type) {
+        case 'revise_progress':
+          cb.onProgress?.(m.stage ?? '', m.message ?? '')
+          break
+        case 'revise_sources':
+          cb.onSources?.(m.sources ?? [])
+          break
+        case 'revise_chunk':
+          cb.onChunk?.(m.report ?? '')
+          break
+        case 'revise_done':
+          cb.onDone?.({
+            report: m.report ?? '',
+            reportId: m.report_id ?? 0,
+            action: m.stage ?? '',
+          })
+          ws.close()
+          resolve()
+          break
+        case 'revise_error':
+          cb.onError?.(m.message ?? '修改失败')
+          ws.close()
+          resolve()
+          break
+      }
+    }
+
+    ws.onerror = () => {
+      cb.onError?.('修改连接错误')
+      resolve()
+    }
+
+    ws.onclose = () => {
+      resolve()
+    }
+  })
+}
