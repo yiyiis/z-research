@@ -136,6 +136,11 @@ type Config struct {
 	// 兜底）。建议设为 (MaxSections+2) * (MaxDraftRevisions+1)
 	// + 一些常数 headroom。
 	MaxRunSteps int
+
+	// ---- 健壮性与计费 ----
+	// LLMMaxRetries 是 LLM 瞬时错误（超时/429/5xx）的指数退避重试次数。
+	// 鉴权(401)/参数(400)错误不重试，立即失败。
+	LLMMaxRetries int
 }
 
 // Engine mode constants. Used in both Config.Mode and
@@ -224,6 +229,9 @@ func LoadConfig() (*Config, error) {
 		// 多智能体外层图 ~6 节点 + 2 hitl 节点，内层 ~3 节点
 		// × MaxSections 个并行子图。粗估 80 步足够且能兜底。
 		MaxRunSteps: getenvInt("MAX_RUN_STEPS", 80),
+
+		// 健壮性：LLM 瞬时错误重试次数（默认 3）。
+		LLMMaxRetries: getenvInt("LLM_MAX_RETRIES", 3),
 	}
 
 	// ENGINE_MODE 放宽：允许 single/multi/react/deep。

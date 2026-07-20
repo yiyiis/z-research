@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -44,12 +45,16 @@ func TestNewFetchTool_InvokableRun(t *testing.T) {
 	t.Logf("✅ fetch_url 调用成功，输出前60字符: %s", truncStr(out, 60))
 }
 
-// TestNewFetchTool_EmptyURL 空 URL 应报错。
+// TestNewFetchTool_EmptyURL 空 URL 应返回友好错误 JSON（而非 error）。
+// 这是工具错误友好化的设计：让 LLM 看到 error 字段并调整策略，而不是 Agent 崩掉。
 func TestNewFetchTool_EmptyURL(t *testing.T) {
 	ft, _ := NewFetchTool()
-	_, err := ft.InvokableRun(context.Background(), `{"url":""}`)
-	if err == nil {
-		t.Error("空 URL 应报错")
+	out, err := ft.InvokableRun(context.Background(), `{"url":""}`)
+	if err != nil {
+		t.Errorf("空 URL 不应返回 error（应返回错误 JSON）: %v", err)
+	}
+	if !strings.Contains(out, "error") {
+		t.Errorf("空 URL 应在 JSON 里含 error 字段, got: %s", out)
 	}
 }
 

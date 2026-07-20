@@ -72,6 +72,9 @@ func NewEngine(cfg *config.Config, l *llm.LLM, r *Researcher) *Engine {
 type FinalReport struct {
 	Markdown string   `json:"markdown"` // 完整 Markdown 报告
 	Sources  []Source `json:"sources"`  // 来源列表
+	// Usage 是本次研究的 token 用量快照（流量计费），nil 表示未统计。
+	// 由 handlers 层从 LLM.Usage() 拿快照填入（引擎本身不直接访问 LLM.Usage）。
+	Usage *llm.UsageSnapshot `json:"usage,omitempty"`
 }
 
 // Run 执行完整研究流程，按 opts.ReportType 分派：

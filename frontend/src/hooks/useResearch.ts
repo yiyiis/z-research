@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { runResearch } from '../api/research'
-import type { Source } from '../api/research'
+import type { Source, UsageSnapshot } from '../api/research'
 
 // ResearchState 描述研究流程的状态机。
 export type ResearchStatus = 'idle' | 'running' | 'awaiting_feedback' | 'done' | 'error'
@@ -25,6 +25,8 @@ export interface ResearchState {
   report: string // 最终报告 Markdown
   reportId: number | null // 已保存的报告 ID
   error: string | null
+  // 本次研究的 token 用量（done 帧附带，流量计费展示）。null = 未统计或未完成。
+  usage: UsageSnapshot | null
 
   // 多智能体 HITL 状态。status='awaiting_feedback' 时
   // 这个字段非空，前端应展示面板让用户接受/修改。
@@ -44,6 +46,7 @@ const initialState: ResearchState = {
   report: '',
   reportId: null,
   error: null,
+  usage: null,
   feedback: null,
   initialResearch: null,
 }
@@ -93,13 +96,14 @@ export function useResearch() {
       onReportChunk: (report) => {
         setState((s) => ({ ...s, report }))
       },
-      onDone: (report, sources, reportId) => {
+      onDone: (report, sources, reportId, usage) => {
         setState((s) => ({
           ...s,
           status: 'done',
           report,
           reportId,
           sources: sources.length ? sources : s.sources,
+          usage: usage ?? null,
           feedback: null,
         }))
       },

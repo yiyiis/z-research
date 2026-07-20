@@ -14,12 +14,23 @@ export interface WSMessage {
   sources?: Source[]
   report?: string // report_chunk/done 用：done 是完整报告，report_chunk 是累积到当前的报告
   report_id?: number
+  // done 帧附带：本次研究的 token 用量（流量计费）。
+  usage?: UsageSnapshot
 
   // human_feedback 帧专属（多智能体 HITL）：
   // 服务端要求用户对当前研究大纲给反馈。
   title?: string
   sections?: string[]
   revision?: number
+}
+
+// UsageSnapshot 是一次研究的 token 用量快照（与后端 llm.UsageSnapshot 对齐）。
+export interface UsageSnapshot {
+  calls: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  reasoning_tokens?: number // 思考模型的思考 token（占 completion 的一部分）
 }
 
 export interface Source {
@@ -63,7 +74,7 @@ export interface ResearchCallbacks {
   onSources?: (sources: Source[]) => void
   // 流式报告：每收到一个块就回调，report 是累积到当前的完整报告（可实时渲染）。
   onReportChunk?: (report: string) => void
-  onDone?: (report: string, sources: Source[], reportId: number) => void
+  onDone?: (report: string, sources: Source[], reportId: number, usage?: UsageSnapshot) => void
   onError?: (message: string) => void
 
   // 多智能体专属：服务端发出 human_feedback 帧时触发。
@@ -137,7 +148,7 @@ export async function runResearch(
           cb.onReportChunk?.(m.report ?? '')
           break
         case 'done':
-          cb.onDone?.(m.report ?? '', m.sources ?? [], m.report_id ?? 0)
+          cb.onDone?.(m.report ?? '', m.sources ?? [], m.report_id ?? 0, m.usage)
           ws.close()
           resolve()
           break

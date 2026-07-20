@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"z-research/backend/internal/llm"
 	"z-research/backend/internal/researcher"
 	"z-research/backend/internal/store"
 )
@@ -28,16 +29,19 @@ type Server struct {
 	reactEngine  researcher.EngineIface // 可为 nil（ReAct Agent）
 	deepEngine   researcher.EngineIface // 可为 nil（深度递归）
 	store        store.Store
+	// llm 用于在 done 帧里拿 token 用量快照（流量计费）。
+	llm *llm.LLM
 }
 
 // NewServer 创建 HTTP 服务。
-func NewServer(single, multi, react, deep researcher.EngineIface, st store.Store) *Server {
+func NewServer(single, multi, react, deep researcher.EngineIface, st store.Store, llmClient *llm.LLM) *Server {
 	return &Server{
 		singleEngine: single,
 		multiEngine:  multi,
 		reactEngine:  react,
 		deepEngine:   deep,
 		store:        st,
+		llm:          llmClient,
 	}
 }
 
@@ -88,6 +92,46 @@ func modeOrSingle(mode string) string {
 	return mode
 }
 
+// friendlyError 把内部错误转成用户友好的中文消息。
+//
+// 设计目标：
+//   - 不暴露敏感信息（API key、内部路径、stack trace）给前端。
+//   - 把常见错误归类成可操作的提示（鉴权/限流/网络/模型问题）。
+//   - 保留原始错误的关键部分供调试（脱敏后）。
+func friendlyError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	kind := llm.ClassifyError(err)
+	switch kind {
+	case llm.ErrAuth:
+		// 鉴权失败：不暴露具体 key 信息，只提示配置问题。
+		return "LLM 鉴权失败：请检查 .env 里的 API Key 是否正确（或是否过期）"
+	case llm.ErrTransient:
+		// 瞬时错误：已重试仍失败，提示稍后重试。
+		if strings.Contains(strings.ToLower(msg), "429") || strings.Contains(strings.ToLower(msg), "rate") {
+			return "LLM 调用被限流（429），请稍后重试或降低并发"
+		}
+		return "网络或 LLM 服务暂时不可用（已自动重试仍失败），请稍后重试"
+	case llm.ErrClient:
+		// 客户端错误：通常是模型名或参数问题。
+		return "LLM 请求参数错误：" + truncateMsg(msg, 100)
+	default:
+		// 未分类错误：截断长度避免泄露过多内部细节。
+		return truncateMsg(msg, 200)
+	}
+}
+
+// truncateMsg 把错误消息截断到 maxRune 字符，超长加省略号。
+func truncateMsg(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
 // toDTO 把 researcher.Source 转为 SourceDTO。
 func toDTO(s researcher.Source) SourceDTO {
 	return SourceDTO{N: s.N, URL: s.URL, Title: s.Title}
@@ -117,13 +161,14 @@ var wsUpgrader = websocket.Upgrader{
 //   - "error"             错误
 //   - "human_feedback"    多智能体模式专属：要求用户对大纲给反馈
 type wsMessage struct {
-	Type         string      `json:"type"`                    // 帧语义
-	Stage        string      `json:"stage,omitempty"`         // progress 专用
-	Message      string      `json:"message,omitempty"`       // 人类可读说明
-	SectionTitle string      `json:"section_title,omitempty"` // progress 专用：当前章节（详细报告）
-	Sources      []SourceDTO `json:"sources,omitempty"`       // sources/done 用
-	Report       string      `json:"report,omitempty"`        // report_chunk/done 用：报告片段或全文
-	ReportID     int64       `json:"report_id,omitempty"`     // done 用：持久化后的报告 ID
+	Type         string             `json:"type"`                    // 帧语义
+	Stage        string             `json:"stage,omitempty"`         // progress 专用
+	Message      string             `json:"message,omitempty"`       // 人类可读说明
+	SectionTitle string             `json:"section_title,omitempty"` // progress 专用：当前章节（详细报告）
+	Sources      []SourceDTO        `json:"sources,omitempty"`       // sources/done 用
+	Report       string             `json:"report,omitempty"`        // report_chunk/done 用：报告片段或全文
+	ReportID     int64              `json:"report_id,omitempty"`     // done 用：持久化后的报告 ID
+	Usage        *llm.UsageSnapshot `json:"usage,omitempty"`         // done 用：token 用量（流量计费）
 
 	// human_feedback 帧专属。
 	Title    string   `json:"title,omitempty"`    // 大纲标题
@@ -272,6 +317,10 @@ func (s *Server) handleResearch(c *gin.Context) {
 	}
 
 	// 跑研究引擎（用 defer recover 防止 panic 直接断连）。
+	// 研究开始前 Reset token 用量统计器（避免累积多次研究的用量）。
+	if s.llm != nil {
+		s.llm.Usage().Reset()
+	}
 	var report *researcher.FinalReport
 	func() {
 		defer func() {
@@ -287,7 +336,7 @@ func (s *Server) handleResearch(c *gin.Context) {
 		if ctx.Err() != nil {
 			return // 客户端断开
 		}
-		safeWrite(wsMessage{Type: "error", Message: err.Error()})
+		safeWrite(wsMessage{Type: "error", Message: friendlyError(err)})
 		return
 	}
 
@@ -309,7 +358,19 @@ func (s *Server) handleResearch(c *gin.Context) {
 		reportID = saved.ID
 	}
 
-	safeWrite(wsMessage{Type: "done", Report: report.Markdown, Sources: srcDTOs, ReportID: reportID})
+	// 流量计费：从 LLM collector 拿本次研究的 token 用量快照。
+	// 每次研究开始前会 Reset collector（见下方引擎调用前），所以这里是本次的用量。
+	var usageSnap *llm.UsageSnapshot
+	if s.llm != nil {
+		snap := s.llm.Usage().Snapshot()
+		usageSnap = &snap
+		// 顺带把 usage 也填进 FinalReport（供需要 FinalReport 的下游使用）。
+		report.Usage = usageSnap
+		// CLI 风格的汇总日志。
+		fmt.Fprintf(os.Stderr, "📊 %s\n", s.llm.Usage().Summary())
+	}
+
+	safeWrite(wsMessage{Type: "done", Report: report.Markdown, Sources: srcDTOs, ReportID: reportID, Usage: usageSnap})
 }
 
 // makeHumanFeedbackFn builds the callback the multi-agent

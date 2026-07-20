@@ -87,11 +87,11 @@ func main() {
 	defer st.Close()
 
 	// 把构造出来的四个引擎传给 NewServer（multi/react/deep 可能为 nil）。
-	singleEngine, multiEngine, reactEngine, deepEngine, err := buildBothEngines(ctx, cfg, st)
+	singleEngine, multiEngine, reactEngine, deepEngine, llmClient, err := buildBothEngines(ctx, cfg, st)
 	if err != nil {
 		die(err)
 	}
-	srv := api.NewServer(singleEngine, multiEngine, reactEngine, deepEngine, st)
+	srv := api.NewServer(singleEngine, multiEngine, reactEngine, deepEngine, st, llmClient)
 	r := srv.Router(*dev)
 
 	log.Printf("🚀 z-research 后端启动: http://localhost%s", cfg.HTTPAddr)
@@ -107,17 +107,18 @@ func main() {
 //
 // single 总是构造成功。multi / react / deep 若构造失败返回 nil（前端选对应模式时报错），
 // 但 single 仍可用，不会让整个服务起不来。
-func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, error) {
+// 同时返回共享的 llmClient（供 handlers 拿 token 用量统计）。
+func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, *llm.LLM, error) {
 	// 先设置抓取策略（Jina 宕机时可改 SCRAPER_STRATEGY=direct）。
 	scraper.SetStrategy(scraper.ScraperStrategy(cfg.ScraperStrategy))
 
 	llmClient, err := llm.NewLLM(ctx, cfg)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	searcher, err := search.NewSearcher(ctx)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	r := researcher.NewResearcher(cfg, llmClient, searcher)
 
@@ -151,7 +152,7 @@ func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (
 		log.Printf("✅ 深度递归引擎就绪 (breadth=%d, depth=%d)", cfg.DeepBreadth, cfg.DeepDepth)
 	}
 
-	return single, multi, reactEng, deepEng, nil
+	return single, multi, reactEng, deepEng, llmClient, nil
 }
 
 func buildMultiAgentEngine(ctx context.Context, cfg *config.Config, llmClient *llm.LLM, inner *researcher.Researcher, st store.Store) (researcher.EngineIface, error) {
@@ -239,6 +240,10 @@ func runCLI(cfg *config.Config, query, mode string, breadth, depth int) {
 	fmt.Println("\n" + strings.Repeat("=", 60))
 	fmt.Println(report.Markdown)
 	fmt.Println(strings.Repeat("=", 60))
+	// 流量计费汇总（CLI 模式打印到 stderr，不污染报告 stdout）。
+	if u := llmClient.Usage(); u != nil {
+		fmt.Fprintf(os.Stderr, "\n📊 %s\n", u.Summary())
+	}
 }
 
 // orDefault 返回 v（若 >0）否则 def。

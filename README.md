@@ -362,6 +362,74 @@ layer 0: query (breadth=4)
 - **`MAX_EMBED_WORKERS=4`**：embedding 计算的并发上限
 - **`visited_urls Set`**（`internal/collection`）：跨子查询/章节/递归层共享的 URL 去重集合
 
+## 健壮性设计（错误处理 / JSON 降级 / 工具失败 / 流量计费）
+
+### LLM 调用重试 + 错误分类（`internal/llm/retry.go`）
+
+LLM API（尤其国内代理）常见瞬时故障，统一处理：
+
+| 错误类型 | 例子 | 处理 |
+|---|---|---|
+| **瞬时**（ErrTransient） | 超时、429 限流、5xx、连接重置、EOF | 指数退避重试（默认 3 次，1s/2s/4s + jitter） |
+| **鉴权**（ErrAuth） | 401/403、API key 错误 | 立即失败，不重试 |
+| **客户端**（ErrClient） | 400、模型不存在、context 超长 | 立即失败，不重试 |
+
+配置：`LLM_MAX_RETRIES=3`（默认）。重试时通过 `onRetry` 回调上报进度。
+
+### JSON 输出失败的两层降级
+
+思考模型截断、模型不听话是 JSON 失败的高发场景，两层防御：
+
+1. **LLM 层**（`chatJSONWith`）：解析失败时**带"修复提示"重试一次**——把上次错误输出 + "你的输出不是合法 JSON"回灌给 LLM 让它修正（对齐 LangChain `OutputFunctionsParser` 的 auto-fix）
+2. **业务层**（各 agent 纯函数）：仍失败时返回**业务安全降级值**，不让整个 graph 崩：
+   - `PlanOutline` → `fallbackOutline(query)` 给通用大纲
+   - `WriteReportLayout` → 空 layout（AssembleReport 仍能用 sections+drafts 拼出可读报告）
+   - `FactCheck` → `verdict=pass`（信任 writer，不卡核查循环）
+   - `ReviseDraft` → 返回原 draft（已有）
+
+### 工具调用失败的友好化（ReAct Agent）
+
+工具不再 `return err`（那会让 Agent 整个流程崩），而是返回**结构化错误 JSON**让 LLM 看懂后调整策略：
+
+```json
+{"error":"搜索失败: DuckDuckGo 超时", "hint":"可尝试换一组关键词，或基于已收集的资料直接撰写报告"}
+```
+
+- `fetch_url` 首次失败会**单次重试**（403/超时重试常成功）
+- 两次都失败才返回错误 JSON，让 LLM 换 URL 或放弃该网页
+- system prompt 明确告诉 LLM "看到 error 字段时按 hint 调整，不要因单个工具失败放弃"
+
+### 流量计费统计（`internal/llm/usage.go`）
+
+从 Eino `ResponseMeta.TokenUsage` 读 token 用量，覆盖一次研究的**所有 LLM 调用**：
+
+```go
+type Usage struct {
+    Model, Tier, Role string  // 哪个模型/档位/角色节点
+    Prompt, Completion int     // 输入/输出 token
+    Total int                  // 合计
+    Reasoning int              // 思考 token（思考模型专属，普通模型 0）
+}
+```
+
+**亮点**：思考模型的 `reasoning_tokens` 单独统计（MiniMax-M3 实测可占输出的 70%，成本占比高但易被忽略）。
+
+三种输出：
+- **CLI**：研究结束打印汇总到 stderr（`📊 LLM 调用 N 次 | 输入 X / 输出 Y / 合计 Z tokens`）
+- **WebSocket**：`done` 帧附带 `usage` 字段，前端用 `UsageBadge` 组件展示
+- **FinalReport.Usage**：结构化快照，可供持久化
+
+### 错误信息友好化（`handlers.friendlyError`）
+
+把内部错误转成用户友好的中文，**不暴露敏感信息**（API key、内部路径、stack trace）：
+
+| 内部错误 | 用户看到 |
+|---|---|
+| 401 Unauthorized | "LLM 鉴权失败：请检查 .env 里的 API Key 是否正确（或是否过期）" |
+| 429 Too Many Requests | "LLM 调用被限流（429），请稍后重试或降低并发" |
+| 500/超时 | "网络或 LLM 服务暂时不可用（已自动重试仍失败），请稍后重试" |
+| 400 Bad Request | "LLM 请求参数错误：<脱敏后的关键信息>" |
+
 ## 后续扩展方向
 
 - **本地知识库 RAG**：接入本地 PDF/Word，用轻量级向量库做持久化检索。

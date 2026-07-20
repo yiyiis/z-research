@@ -211,6 +211,8 @@ export function App() {
             <>
               <ReportView markdown={showReport} />
               <SourceList sources={showSources} />
+              {/* 流量计费展示：仅当前研究完成（非查看历史）时显示 */}
+              {!viewing && state.usage && <UsageBadge usage={state.usage} />}
             </>
           )}
 
@@ -237,6 +239,31 @@ export function App() {
           )}
         </div>
       </main>
+    </div>
+  )
+}
+
+// UsageBadge 在报告底部展示本次研究的 token 用量（流量计费）。
+// 让用户直观看到成本，思考模型的 reasoning 单独标注。
+function UsageBadge({ usage }: { usage: { calls: number; prompt_tokens: number; completion_tokens: number; total_tokens: number; reasoning_tokens?: number } }) {
+  if (!usage || usage.total_tokens === 0) return null
+  const reasoningPct = usage.reasoning_tokens && usage.completion_tokens > 0
+    ? Math.round((usage.reasoning_tokens / usage.completion_tokens) * 100)
+    : null
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-2 text-xs text-gray-600">
+      <span className="font-medium text-gray-800">📊 流量计费</span>
+      <span className="ml-2">
+        LLM 调用 <b>{usage.calls}</b> 次 ·
+        输入 <b>{usage.prompt_tokens.toLocaleString()}</b> /
+        输出 <b>{usage.completion_tokens.toLocaleString()}</b> /
+        合计 <b>{usage.total_tokens.toLocaleString()}</b> tokens
+      </span>
+      {reasoningPct !== null && (
+        <span className="ml-2 text-purple-600">
+          （其中思考 {usage.reasoning_tokens!.toLocaleString()}，占输出 {reasoningPct}%）
+        </span>
+      )}
     </div>
   )
 }
