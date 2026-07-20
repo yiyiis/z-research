@@ -207,3 +207,6 @@ func (d ScoreDTO) MarshalJSON() ([]byte, error) {
 	type alias ScoreDTO
 	return json.Marshal(alias(d))
 }
+
+// Ptr 返回 d 的指针(便于 wsMessage 的 Evaluation *ScoreDTO 字段赋值)。
+func (d ScoreDTO) Ptr() *ScoreDTO { return &d }

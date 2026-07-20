@@ -9,10 +9,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"z-research/backend/internal/eval"
 	"z-research/backend/internal/llm"
 	"z-research/backend/internal/researcher"
 	"z-research/backend/internal/store"
@@ -31,17 +33,23 @@ type Server struct {
 	store        store.Store
 	// llm 用于在 done 帧里拿 token 用量快照（流量计费）。
 	llm *llm.LLM
+	// evalStore 持久化 LLM-as-Judge 评估分数，nil 表示禁用评估。
+	evalStore *store.SQLiteEvaluationStore
+	// evaluateOnDone 控制是否在 done 后自动评估（来自 cfg.EvalOnDone）。
+	evaluateOnDone bool
 }
 
 // NewServer 创建 HTTP 服务。
-func NewServer(single, multi, react, deep researcher.EngineIface, st store.Store, llmClient *llm.LLM) *Server {
+func NewServer(single, multi, react, deep researcher.EngineIface, st store.Store, llmClient *llm.LLM, evalStore *store.SQLiteEvaluationStore, evaluateOnDone bool) *Server {
 	return &Server{
-		singleEngine: single,
-		multiEngine:  multi,
-		reactEngine:  react,
-		deepEngine:   deep,
-		store:        st,
-		llm:          llmClient,
+		singleEngine:  single,
+		multiEngine:   multi,
+		reactEngine:   react,
+		deepEngine:    deep,
+		store:         st,
+		llm:           llmClient,
+		evalStore:     evalStore,
+		evaluateOnDone: evaluateOnDone,
 	}
 }
 
@@ -169,6 +177,7 @@ type wsMessage struct {
 	Report       string             `json:"report,omitempty"`        // report_chunk/done 用：报告片段或全文
 	ReportID     int64              `json:"report_id,omitempty"`     // done 用：持久化后的报告 ID
 	Usage        *llm.UsageSnapshot `json:"usage,omitempty"`         // done 用：token 用量（流量计费）
+	Evaluation   *eval.ScoreDTO     `json:"evaluation,omitempty"`    // evaluation 帧：LLM-as-Judge 评分
 
 	// human_feedback 帧专属。
 	Title    string   `json:"title,omitempty"`    // 大纲标题
@@ -371,6 +380,54 @@ func (s *Server) handleResearch(c *gin.Context) {
 	}
 
 	safeWrite(wsMessage{Type: "done", Report: report.Markdown, Sources: srcDTOs, ReportID: reportID, Usage: usageSnap})
+
+	// LLM-as-Judge 自动评估（done 帧之后）。
+	// 评估是"锦上添花"：失败不致命，不报错给前端（只是不展示评分）。
+	// done 帧先发，让前端立即展示报告；评估完成后再发 evaluation 帧，前端刷新评分卡片。
+	// 连接保持到评估完成（或超时），评估通常比生成报告快得多。
+	if s.evaluateOnDone && s.evalStore != nil && s.llm != nil && reportID > 0 {
+		s.runEvaluation(ctx, req.Query, report.Markdown, report.Sources, reportID, safeWrite)
+	}
+}
+
+// runEvaluation 调用 LLM-as-Judge 给报告打分，持久化结果，并通过 WS 推送 evaluation 帧。
+// 失败时静默（只记日志），不影响主流程。带超时保护（评估卡住不拖死连接）。
+func (s *Server) runEvaluation(parentCtx context.Context, query, reportMarkdown string,
+	sources []researcher.Source, reportID int64, safeWrite func(wsMessage)) {
+
+	// 评估用独立 ctx（带超时），避免 parentCtx 取消时评估半途而废。
+	// 但若 parentCtx 已取消（客户端断开），就别评估了（推也没人收）。
+	if parentCtx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// 把 researcher.Source 转成 eval.SourceRow（解耦）。
+	rows := make([]eval.SourceRow, len(sources))
+	for i, src := range sources {
+		rows[i] = eval.SourceRow{N: src.N, URL: src.URL, Title: src.Title}
+	}
+
+	score, err := eval.JudgeReport(ctx, s.llm, query, reportMarkdown, rows)
+	if err != nil {
+		// 评估失败：记日志，不推帧（前端不展示评分即可）。
+		fmt.Fprintf(os.Stderr, "⚠️  评估失败 (report %d): %v\n", reportID, err)
+		return
+	}
+
+	// 持久化评估结果（失败不致命，仍推帧给前端）。
+	scoreJSON, _ := json.Marshal(score)
+	if _, err := s.evalStore.SaveEvaluation(parentCtx, store.SaveEvaluationInput{
+		ReportID:  reportID,
+		ScoreJSON: string(scoreJSON),
+		Overall:   score.Overall(),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  评估持久化失败 (report %d): %v\n", reportID, err)
+	}
+
+	// 推 evaluation 帧（带扁平化 DTO，便于前端渲染）。
+	safeWrite(wsMessage{Type: "evaluation", ReportID: reportID, Evaluation: score.ToDTO().Ptr()})
 }
 
 // makeHumanFeedbackFn builds the callback the multi-agent

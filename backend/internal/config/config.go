@@ -141,6 +141,11 @@ type Config struct {
 	// LLMMaxRetries 是 LLM 瞬时错误（超时/429/5xx）的指数退避重试次数。
 	// 鉴权(401)/参数(400)错误不重试，立即失败。
 	LLMMaxRetries int
+
+	// EvalOnDone 控制是否在报告生成完成后自动跑 LLM-as-Judge 评估。
+	// 评估结果通过 evaluation 帧推给前端 + 持久化到 report_evaluations 表。
+	// 关闭可省一次 LLM 调用（评估用 smart 档位，成本与一次写作相当）。
+	EvalOnDone bool
 }
 
 // Engine mode constants. Used in both Config.Mode and
@@ -232,6 +237,9 @@ func LoadConfig() (*Config, error) {
 
 		// 健壮性：LLM 瞬时错误重试次数（默认 3）。
 		LLMMaxRetries: getenvInt("LLM_MAX_RETRIES", 3),
+
+		// 评估：报告生成后自动跑 LLM-as-Judge（默认 true）。
+		EvalOnDone: getenvBool("EVALUATE_ON_DONE", true),
 	}
 
 	// ENGINE_MODE 放宽：允许 single/multi/react/deep。

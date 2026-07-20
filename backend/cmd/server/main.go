@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -25,6 +26,7 @@ import (
 	"z-research/backend/internal/api"
 	"z-research/backend/internal/config"
 	"z-research/backend/internal/deep"
+	"z-research/backend/internal/eval"
 	"z-research/backend/internal/llm"
 	"z-research/backend/internal/multiagent"
 	"z-research/backend/internal/researcher"
@@ -91,7 +93,14 @@ func main() {
 	if err != nil {
 		die(err)
 	}
-	srv := api.NewServer(singleEngine, multiEngine, reactEngine, deepEngine, st, llmClient)
+	// 构造评估 store（LLM-as-Judge 评估结果持久化）。失败非致命，降级为不评估。
+	var evalStore *store.SQLiteEvaluationStore
+	if es, esErr := store.NewSQLiteEvaluationStore(ctx, st); esErr == nil {
+		evalStore = es
+	} else {
+		log.Printf("⚠️  评估 store 构造失败，将不启用自动评估: %v", esErr)
+	}
+	srv := api.NewServer(singleEngine, multiEngine, reactEngine, deepEngine, st, llmClient, evalStore, cfg.EvalOnDone)
 	r := srv.Router(*dev)
 
 	log.Printf("🚀 z-research 后端启动: http://localhost%s", cfg.HTTPAddr)
@@ -243,6 +252,31 @@ func runCLI(cfg *config.Config, query, mode string, breadth, depth int) {
 	// 流量计费汇总（CLI 模式打印到 stderr，不污染报告 stdout）。
 	if u := llmClient.Usage(); u != nil {
 		fmt.Fprintf(os.Stderr, "\n📊 %s\n", u.Summary())
+	}
+	// LLM-as-Judge 自动评估（与 WS handler 一致的逻辑）。
+	// 评估失败不致命，只记日志。
+	if cfg.EvalOnDone {
+		runCLIEvaluation(ctx, llmClient, query, report.Markdown, report.Sources)
+	}
+}
+
+// runCLIEvaluation 在 CLI 模式下给报告打分并打印到 stderr。
+func runCLIEvaluation(ctx context.Context, l *llm.LLM, query, reportMarkdown string, sources []researcher.Source) {
+	rows := make([]eval.SourceRow, len(sources))
+	for i, src := range sources {
+		rows[i] = eval.SourceRow{N: src.N, URL: src.URL, Title: src.Title}
+	}
+	evalCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	score, err := eval.JudgeReport(evalCtx, l, query, reportMarkdown, rows)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  评估失败: %v\n", err)
+		return
+	}
+	dto := score.ToDTO()
+	fmt.Fprintf(os.Stderr, "\n📝 评估: 综合 %.1f/10 — %s\n", dto.Overall, dto.Summary)
+	for _, d := range dto.Dimensions {
+		fmt.Fprintf(os.Stderr, "   %-12s %.1f  %s\n", d.Label, d.Score, d.Note)
 	}
 }
 
