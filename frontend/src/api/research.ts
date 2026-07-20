@@ -7,21 +7,37 @@
 
 // WS 推送的统一消息格式（与后端 api.wsMessage 对齐）。
 export interface WSMessage {
-  type: 'progress' | 'sources' | 'report_chunk' | 'done' | 'error' | 'human_feedback'
+  type: 'progress' | 'sources' | 'report_chunk' | 'done' | 'error' | 'human_feedback' | 'evaluation' | 'revise_progress' | 'revise_chunk' | 'revise_sources' | 'revise_done' | 'revise_error'
   stage?: string
   message?: string
   section_title?: string // 详细报告：当前正在写的章节
   sources?: Source[]
-  report?: string // report_chunk/done 用：done 是完整报告，report_chunk 是累积到当前的报告
+  report?: string // report_chunk/done/revise_chunk/revise_done 用
   report_id?: number
   // done 帧附带：本次研究的 token 用量（流量计费）。
   usage?: UsageSnapshot
+  // evaluation 帧附带：LLM-as-Judge 评分。
+  evaluation?: Evaluation
 
   // human_feedback 帧专属（多智能体 HITL）：
-  // 服务端要求用户对当前研究大纲给反馈。
   title?: string
   sections?: string[]
   revision?: number
+}
+
+// Evaluation 是 LLM-as-Judge 的评分结果（与后端 eval.ScoreDTO 对齐）。
+export interface Evaluation {
+  overall: number            // 综合分 0-10
+  summary: string            // 一句话总评
+  dimensions: DimensionScore[] // 各维度评分（有序）
+}
+
+// DimensionScore 是单个维度的评分。
+export interface DimensionScore {
+  name: string    // coverage/citation/structure/objectivity/readability
+  label: string   // 中文标签
+  score: number   // 0-10
+  note: string    // 扣分原因
 }
 
 // UsageSnapshot 是一次研究的 token 用量快照（与后端 llm.UsageSnapshot 对齐）。
@@ -75,6 +91,8 @@ export interface ResearchCallbacks {
   // 流式报告：每收到一个块就回调，report 是累积到当前的完整报告（可实时渲染）。
   onReportChunk?: (report: string) => void
   onDone?: (report: string, sources: Source[], reportId: number, usage?: UsageSnapshot) => void
+  // 评估完成时触发（done 帧之后异步到达的 evaluation 帧）。
+  onEvaluation?: (evaluation: Evaluation, reportId: number) => void
   onError?: (message: string) => void
 
   // 多智能体专属：服务端发出 human_feedback 帧时触发。
@@ -149,6 +167,21 @@ export async function runResearch(
           break
         case 'done':
           cb.onDone?.(m.report ?? '', m.sources ?? [], m.report_id ?? 0, m.usage)
+          // 不立即 close：evaluation 帧会在 done 之后异步到达。
+          // 设置一个超时兜底（评估慢或失败时仍能关闭连接）。
+          // 若 30s 内没收到 evaluation，强制关闭。
+          setTimeout(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.close()
+            }
+            resolve()
+          }, 30000)
+          break
+        case 'evaluation':
+          // LLM-as-Judge 评估完成（done 之后异步到达）。
+          if (m.evaluation) {
+            cb.onEvaluation?.(m.evaluation, m.report_id ?? 0)
+          }
           ws.close()
           resolve()
           break

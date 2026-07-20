@@ -4,6 +4,7 @@ import { ProgressLog } from './components/ProgressLog'
 import { ReportView } from './components/ReportView'
 import { SourceList } from './components/SourceList'
 import { HistoryPanel, getReport } from './components/HistoryPanel'
+import { EvaluationBadge } from './components/EvaluationBadge'
 import { HumanFeedbackPanel } from './components/HumanFeedbackPanel'
 import { useResearch } from './hooks/useResearch'
 import type { ReportDetail } from './api/research'
@@ -209,6 +210,8 @@ export function App() {
 
           {showReport && (
             <>
+              {/* LLM-as-Judge 质量评估（仅当前研究完成、非查看历史时展示） */}
+              {!viewing && state.evaluation && <EvaluationBadge evaluation={state.evaluation} />}
               <ReportView markdown={showReport} />
               <SourceList sources={showSources} />
               {/* 流量计费展示：仅当前研究完成（非查看历史）时显示 */}
