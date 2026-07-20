@@ -23,6 +23,8 @@ func TestClassifyError(t *testing.T) {
 		{"rate_limit", errors.New("rate_limit exceeded"), ErrTransient},
 		{"500", errors.New("500 Internal Server Error"), ErrTransient},
 		{"503", errors.New("503 Service Unavailable"), ErrTransient},
+		{"529_minimax", errors.New("error, status code: 529, status: 529, message: 当前服务集群负载较高"), ErrTransient},
+		{"overloaded", errors.New("service overloaded"), ErrTransient},
 		{"eof", errors.New("unexpected EOF"), ErrTransient},
 		{"conn_reset", errors.New("connection reset by peer"), ErrTransient},
 		{"401", errors.New("401 Unauthorized"), ErrAuth},

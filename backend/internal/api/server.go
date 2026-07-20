@@ -54,6 +54,17 @@ func (s *Server) Router(dev bool) *gin.Engine {
 		registerSPA(r, staticFS)
 	}
 
+	// 功能测试页：原生 HTML+JS，不依赖 React/node_modules。
+	// 用于在没有前端构建环境时验证 WS 功能（研究/评估/修改）。
+	r.GET("/test.html", func(c *gin.Context) {
+		data, err := webFS.ReadFile("web/test.html")
+		if err != nil {
+			c.String(http.StatusNotFound, "test.html not found")
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+	})
+
 	return r
 }
 

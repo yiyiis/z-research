@@ -67,10 +67,17 @@ func ClassifyError(err error) ErrorKind {
 	}
 
 	// 瞬时错误：超时 / 429 / 5xx / 连接重置 / EOF。
+	// 包含各家服务商特有的过载状态码：
+	//   - 429: OpenAI/通用限流
+	//   - 500/502/503/504: 通用服务端错误
+	//   - 529: MiniMax 特有的"服务集群负载较高"(overloaded)
+	//   - 530: Cloudflare 特有
 	if containsAny(s,
 		"timeout", "timed out", "context deadline exceeded",
 		"429", "rate limit", "rate_limit", "too many requests",
-		"500", "502", "503", "504", "internal server error", "bad gateway", "service unavailable", "gateway timeout",
+		"500", "502", "503", "504", "529", "530",
+		"internal server error", "bad gateway", "service unavailable", "gateway timeout",
+		"overload", "overloaded", "负载较高", "集群", "稍后重试",
 		"connection reset", "connection refused", "eof", "broken pipe", "temporary failure",
 	) {
 		return ErrTransient
