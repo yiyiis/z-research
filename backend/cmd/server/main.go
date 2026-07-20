@@ -30,6 +30,7 @@ import (
 	"z-research/backend/internal/llm"
 	"z-research/backend/internal/multiagent"
 	"z-research/backend/internal/researcher"
+	"z-research/backend/internal/revise"
 	"z-research/backend/internal/scraper"
 	"z-research/backend/internal/search"
 	"z-research/backend/internal/store"
@@ -89,7 +90,7 @@ func main() {
 	defer st.Close()
 
 	// 把构造出来的四个引擎传给 NewServer（multi/react/deep 可能为 nil）。
-	singleEngine, multiEngine, reactEngine, deepEngine, llmClient, err := buildBothEngines(ctx, cfg, st)
+	singleEngine, multiEngine, reactEngine, deepEngine, llmClient, researcherInst, err := buildBothEngines(ctx, cfg, st)
 	if err != nil {
 		die(err)
 	}
@@ -100,7 +101,9 @@ func main() {
 	} else {
 		log.Printf("⚠️  评估 store 构造失败，将不启用自动评估: %v", esErr)
 	}
-	srv := api.NewServer(singleEngine, multiEngine, reactEngine, deepEngine, st, llmClient, evalStore, cfg.EvalOnDone)
+	// 构造修改引擎（报告对话式修改）。复用研究引擎的 researcher 依赖。
+	reviseEngine := revise.NewEngine(cfg, llmClient, researcherInst, st)
+	srv := api.NewServer(singleEngine, multiEngine, reactEngine, deepEngine, st, llmClient, evalStore, cfg.EvalOnDone, reviseEngine)
 	r := srv.Router(*dev)
 
 	log.Printf("🚀 z-research 后端启动: http://localhost%s", cfg.HTTPAddr)
@@ -117,17 +120,17 @@ func main() {
 // single 总是构造成功。multi / react / deep 若构造失败返回 nil（前端选对应模式时报错），
 // 但 single 仍可用，不会让整个服务起不来。
 // 同时返回共享的 llmClient（供 handlers 拿 token 用量统计）。
-func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, *llm.LLM, error) {
+func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, researcher.EngineIface, *llm.LLM, *researcher.Researcher, error) {
 	// 先设置抓取策略（Jina 宕机时可改 SCRAPER_STRATEGY=direct）。
 	scraper.SetStrategy(scraper.ScraperStrategy(cfg.ScraperStrategy))
 
 	llmClient, err := llm.NewLLM(ctx, cfg)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	searcher, err := search.NewSearcher(ctx)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	r := researcher.NewResearcher(cfg, llmClient, searcher)
 
@@ -161,7 +164,7 @@ func buildBothEngines(ctx context.Context, cfg *config.Config, st store.Store) (
 		log.Printf("✅ 深度递归引擎就绪 (breadth=%d, depth=%d)", cfg.DeepBreadth, cfg.DeepDepth)
 	}
 
-	return single, multi, reactEng, deepEng, llmClient, nil
+	return single, multi, reactEng, deepEng, llmClient, r, nil
 }
 
 func buildMultiAgentEngine(ctx context.Context, cfg *config.Config, llmClient *llm.LLM, inner *researcher.Researcher, st store.Store) (researcher.EngineIface, error) {

@@ -37,6 +37,8 @@ func (s *Server) Router(dev bool) *gin.Engine {
 
 	// WebSocket 研究端点（全双工长连接，实时推送进度）。
 	r.GET("/ws", s.handleResearch)
+	// WebSocket 修改端点（独立的修改会话，支持多轮对话式修改报告）。
+	r.GET("/ws/revise", s.handleRevise)
 
 	// 报告 CRUD（普通 REST）。
 	api := r.Group("/api")

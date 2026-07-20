@@ -17,6 +17,7 @@ import (
 	"z-research/backend/internal/eval"
 	"z-research/backend/internal/llm"
 	"z-research/backend/internal/researcher"
+	"z-research/backend/internal/revise"
 	"z-research/backend/internal/store"
 )
 
@@ -37,10 +38,12 @@ type Server struct {
 	evalStore *store.SQLiteEvaluationStore
 	// evaluateOnDone 控制是否在 done 后自动评估（来自 cfg.EvalOnDone）。
 	evaluateOnDone bool
+	// reviseEngine 是报告对话式修改引擎，nil 表示禁用修改功能。
+	reviseEngine *revise.Engine
 }
 
 // NewServer 创建 HTTP 服务。
-func NewServer(single, multi, react, deep researcher.EngineIface, st store.Store, llmClient *llm.LLM, evalStore *store.SQLiteEvaluationStore, evaluateOnDone bool) *Server {
+func NewServer(single, multi, react, deep researcher.EngineIface, st store.Store, llmClient *llm.LLM, evalStore *store.SQLiteEvaluationStore, evaluateOnDone bool, reviseEng *revise.Engine) *Server {
 	return &Server{
 		singleEngine:  single,
 		multiEngine:   multi,
@@ -50,6 +53,7 @@ func NewServer(single, multi, react, deep researcher.EngineIface, st store.Store
 		llm:           llmClient,
 		evalStore:     evalStore,
 		evaluateOnDone: evaluateOnDone,
+		reviseEngine:  reviseEng,
 	}
 }
 
